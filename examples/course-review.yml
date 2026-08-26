@@ -1,0 +1,72 @@
+version: 1
+
+course:
+  name: 数据结构
+  timezone: Asia/Shanghai
+  title_template: "[{student_id}{student_name}]{assignment_id}作业提交"
+  submission_path_template: "{student_id}{student_name}/{assignment_id}"
+
+features:
+  auto_merge: false
+  ai_review: true
+  ocr_review: true
+  vision_review: true
+  metrics: true
+
+defaults:
+  min_nonempty_lines: 10
+  allow_extra_files: false
+  late_close_after_days: 7
+
+ai:
+  model: glm-4.7-flash
+  min_confidence: 0.8
+  timeout_seconds: 60
+  max_attempts: 3
+  max_file_bytes: 200000
+  max_total_bytes: 500000
+  max_output_tokens: 2048
+
+ocr:
+  detection_model: PP-OCRv6_small_det
+  recognition_model: PP-OCRv6_small_rec
+  min_line_confidence: 0.65
+  max_text_chars: 20000
+
+vision:
+  model: glm-4.6v-flash
+  min_confidence: 0.85
+  fail_confidence: 0.9
+  timeout_seconds: 90
+  max_attempts: 3
+  max_images: 6
+  max_image_bytes: 5000000
+  max_total_bytes: 12000000
+  max_pixels: 25000000
+  max_side: 4096
+  max_output_tokens: 2048
+
+assignments:
+  Lab1:
+    deadline: "2026-09-20T23:59:59+08:00"
+    required_files:
+      - Lab1.md
+      - one_of:
+          - result.png
+          - result.jpg
+          - result.jpeg
+    vision_files:
+      - result.*
+    review_points:
+      - 检查作业是否完成题目要求
+      - 检查截图中的运行结果是否与答案一致
+
+  Lab2:
+    deadline: "2026-10-08T23:59:59+08:00"
+    required_files:
+      - stack.py
+      - report.md
+    vision_files: []
+    review_points:
+      - 检查栈操作实现是否正确
+      - 检查复杂度分析是否正确

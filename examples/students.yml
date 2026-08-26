@@ -1,0 +1,13 @@
+version: 1
+
+students:
+  "2023010102":
+    name: 刘西莹
+    github: example-user
+    class: 计科一班
+    active: true
+  "2023010103":
+    name: 张三
+    github: zhangsan-github
+    class: 计科一班
+    active: true

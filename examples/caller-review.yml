@@ -1,0 +1,41 @@
+name: Course PR Review
+
+on:
+  workflow_run:
+    workflows: ["PR 信息收集"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  review:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Download trusted PR metadata
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pr-info
+          path: pr-info
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      # Replace REVIEWER_COMMIT_SHA after the first stable release.
+      - name: Run shared reviewer
+        uses: LiuXiYing/course-pr-reviewer@REVIEWER_COMMIT_SHA
+        with:
+          config-path: .github/course-review.yml
+          students-path: .github/students.yml
+          metadata-dir: pr-info
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          glm-api-key: ${{ secrets.GLM_API_KEY }}

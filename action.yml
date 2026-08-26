@@ -1,0 +1,73 @@
+name: Course PR Reviewer
+description: Fail-closed reusable reviewer for course assignment pull requests
+author: LiuXiYing
+
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  config-path:
+    description: Path to .github/course-review.yml in the caller repository
+    required: true
+  students-path:
+    description: Path to .github/students.yml in the caller repository
+    required: true
+  metadata-dir:
+    description: Directory containing trusted PR metadata from the triggering workflow
+    required: false
+    default: pr-info
+  github-token:
+    description: Ephemeral GITHUB_TOKEN supplied by the caller
+    required: true
+  glm-api-key:
+    description: GLM API key; required when ai_review or vision_review is enabled
+    required: false
+
+outputs:
+  decision:
+    description: PASS, FAIL, MANUAL_REVIEW, or ERROR
+    value: ${{ steps.review.outputs.decision }}
+  result-json:
+    description: Compact structured review result
+    value: ${{ steps.review.outputs.result-json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: "3.11"
+
+    - name: Install reviewer
+      shell: bash
+      env:
+        REVIEWER_ACTION_PATH: ${{ github.action_path }}
+      run: python -m pip install --disable-pip-version-check "$REVIEWER_ACTION_PATH"
+
+    - name: Install local PaddleOCR runtime when enabled
+      shell: bash
+      env:
+        COURSE_REVIEW_CONFIG: ${{ inputs.config-path }}
+        REVIEWER_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        runtime_groups="$(course-pr-reviewer runtime-requirements --config "$COURSE_REVIEW_CONFIG")"
+        if [[ " $runtime_groups " == *" ocr "* ]]; then
+          python -m pip install --disable-pip-version-check "${REVIEWER_ACTION_PATH}[ocr]"
+        fi
+
+    - name: Review pull request
+      id: review
+      shell: bash
+      env:
+        COURSE_REVIEW_CONFIG: ${{ inputs.config-path }}
+        COURSE_STUDENTS_CONFIG: ${{ inputs.students-path }}
+        PR_INFO_DIR: ${{ inputs.metadata-dir }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        GLM_API_KEY: ${{ inputs.glm-api-key }}
+      run: >-
+        course-pr-reviewer review
+        --config "$COURSE_REVIEW_CONFIG"
+        --students "$COURSE_STUDENTS_CONFIG"
+        --metadata-dir "$PR_INFO_DIR"

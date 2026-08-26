@@ -1,0 +1,38 @@
+name: PR 信息收集
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write trusted event metadata
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require("fs");
+            const pr = context.payload.pull_request;
+            fs.mkdirSync("pr-info", { recursive: true });
+            fs.writeFileSync(
+              "pr-info/event.json",
+              JSON.stringify({
+                repository: `${context.repo.owner}/${context.repo.repo}`,
+                number: pr.number,
+                title: pr.title,
+                head_sha: pr.head.sha,
+                event_at: pr.updated_at
+              })
+            );
+
+      - name: Upload trusted PR metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-info
+          path: pr-info/event.json
+          retention-days: 1
+          if-no-files-found: error

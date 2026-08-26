@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/LiuXiYing/course-pr-reviewer/schemas/vision-review.schema.json",
+  "title": "GLM course assignment image review response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "summary", "confidence", "issues"],
+  "properties": {
+    "decision": {"enum": ["PASS", "FAIL", "MANUAL_REVIEW"]},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "issues": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "message", "file", "evidence", "rule"],
+        "properties": {
+          "category": {
+            "enum": ["VISUAL_VIOLATION", "OCR_TEXT_VIOLATION", "PROMPT_INJECTION", "UNCERTAIN"]
+          },
+          "message": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "file": {"type": "string", "minLength": 1, "maxLength": 255},
+          "evidence": {"type": "string", "minLength": 1, "maxLength": 500},
+          "rule": {"type": "string", "minLength": 1, "maxLength": 1000}
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"decision": {"const": "PASS"}}},
+      "then": {"properties": {"issues": {"maxItems": 0}}},
+      "else": {"properties": {"issues": {"minItems": 1}}}
+    }
+  ]
+}

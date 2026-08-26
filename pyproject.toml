@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "course-pr-reviewer"
+version = "0.4.0"
+description = "Reusable, fail-closed GitHub PR reviewer for course assignments"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "jsonschema[format]==4.25.1",
+  "Pillow==12.3.0",
+  "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+excel = ["openpyxl==3.1.5"]
+ocr = ["paddleocr==3.7.0", "paddlepaddle==3.3.1"]
+
+[project.scripts]
+course-pr-reviewer = "course_pr_reviewer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+course_pr_reviewer = ["schemas/*.json"]
