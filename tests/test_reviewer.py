@@ -146,9 +146,28 @@ class DeterministicReviewerTests(unittest.TestCase):
         result = review_pull_request(
             self.course,
             self.roster,
-            self.snapshot(event_at=dt.datetime(2100, 1, 1, tzinfo=dt.UTC)),
+            self.snapshot(
+                event_at=dt.datetime(
+                    2099,
+                    9,
+                    21,
+                    tzinfo=dt.timezone(dt.timedelta(hours=8)),
+                )
+            ),
         )
         self.assertIn(ReasonCode.DEADLINE_EXCEEDED, self.codes(result))
+
+    def test_very_late_event_requests_automatic_close(self):
+        self.course.data["features"]["close_late_pr"] = True
+        self.course.data["defaults"]["late_close_after_days"] = 7
+        result = review_pull_request(
+            self.course,
+            self.roster,
+            self.snapshot(event_at=dt.datetime(2100, 1, 1, tzinfo=dt.UTC)),
+        )
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertTrue(result.metadata["close_pr"])
+        self.assertIn(ReasonCode.LATE_PR_CLOSE_REQUIRED, self.codes(result))
 
     def test_enabled_ai_without_configured_reviewer_is_error(self):
         self.course.data["features"]["ai_review"] = True

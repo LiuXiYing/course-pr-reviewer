@@ -13,11 +13,24 @@ ROOT = Path(__file__).parents[1]
 
 
 class CourseConfigurationTests(unittest.TestCase):
+    def test_empty_semester_configuration_is_valid(self):
+        data = yaml.safe_load(
+            (ROOT / "examples/course-review.yml").read_text(encoding="utf-8")
+        )
+        data["assignments"] = {}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "course.yml"
+            path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            course = load_course_config(path)
+        self.assertEqual(course.assignments, {})
+
     def test_example_configuration_loads(self):
         course = load_course_config(ROOT / "examples/course-review.yml")
         self.assertEqual(course.name, "数据结构")
         self.assertEqual(sorted(course.assignments), ["Lab1", "Lab2"])
-        self.assertFalse(course.feature_enabled("auto_merge"))
+        self.assertTrue(course.feature_enabled("auto_merge"))
+        self.assertTrue(course.feature_enabled("comment_review"))
+        self.assertTrue(course.feature_enabled("close_late_pr"))
 
     def test_expected_title_uses_roster_identity(self):
         course = load_course_config(ROOT / "examples/course-review.yml")
@@ -151,6 +164,14 @@ class CourseConfigurationTests(unittest.TestCase):
 
 
 class StudentRosterTests(unittest.TestCase):
+    def test_empty_roster_is_valid_before_import(self):
+        data = {"version": 1, "students": {}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "students.yml"
+            path.write_text(yaml.safe_dump(data), encoding="utf-8")
+            roster = load_student_roster(path)
+        self.assertEqual(roster.by_student_id, {})
+
     def test_example_roster_loads_case_insensitively(self):
         roster = load_student_roster(ROOT / "examples/students.yml")
         student = roster.find_by_github("ZhangSan-GitHub")

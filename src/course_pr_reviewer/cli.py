@@ -12,6 +12,7 @@ from .ai import GlmAIReviewer, GlmClient
 from .config import load_course_config, load_student_roster
 from .exceptions import ConfigurationError, ReviewerError
 from .models import Decision, Issue, ReasonCode, ReviewResult
+from .publisher import GitHubResultPublisher, load_result
 from .reviewer import review_pull_request
 from .roster_import import import_students_excel
 from .snapshot import GitHubClient, load_snapshot
@@ -33,6 +34,12 @@ def _parser() -> argparse.ArgumentParser:
     review.add_argument("--students", required=True)
     review.add_argument("--metadata-dir", required=True)
     review.add_argument("--result-file", default="review-result.json")
+
+    publish = subparsers.add_parser(
+        "publish", help="comment, merge, or close a reviewed PR safely"
+    )
+    publish.add_argument("--config", required=True)
+    publish.add_argument("--result-file", required=True)
 
     roster_import = subparsers.add_parser(
         "import-students", help="convert a three-column .xlsx roster to students.yml"
@@ -138,7 +145,7 @@ def _write_error_result(message: str, result_file: str, code: ReasonCode) -> Non
         decision=Decision.ERROR,
         summary="审核器无法可靠地完成本次审核。",
         issues=(Issue(code=code, message=message),),
-        metadata={"reviewer_version": "0.4.0"},
+        metadata={"reviewer_version": "0.5.0"},
     )
     Path(result_file).write_text(result.to_json() + "\n", encoding="utf-8")
     _write_github_output(result)
@@ -167,6 +174,20 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 groups.append("ocr")
             print(" ".join(groups))
+            return 0
+        if args.command == "publish":
+            course = load_course_config(args.config)
+            token = os.environ.get("GH_TOKEN", "")
+            expected_repository = os.environ.get("GITHUB_REPOSITORY", "")
+            github = GitHubClient(
+                token,
+                api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
+            )
+            result = load_result(args.result_file)
+            outcome = GitHubResultPublisher(github).publish(
+                course, result, expected_repository=expected_repository
+            )
+            print(json.dumps(outcome.__dict__, ensure_ascii=False, sort_keys=True))
             return 0
         return _review(args.config, args.students, args.metadata_dir, args.result_file)
     except ReviewerError as exc:

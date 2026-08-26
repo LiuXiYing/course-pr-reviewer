@@ -5,9 +5,12 @@ course:
   timezone: Asia/Shanghai
   title_template: "[{student_id}{student_name}]{assignment_id}作业提交"
   submission_path_template: "{student_id}{student_name}/{assignment_id}"
+  merge_method: merge
 
 features:
-  auto_merge: false
+  auto_merge: true
+  comment_review: true
+  close_late_pr: true
   ai_review: true
   ocr_review: true
   vision_review: true

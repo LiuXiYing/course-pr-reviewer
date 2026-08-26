@@ -25,15 +25,18 @@
           "minLength": 1,
           "maxLength": 200,
           "default": "{student_id}{student_name}/{assignment_id}"
-        }
+        },
+        "merge_method": {"enum": ["merge", "squash", "rebase"], "default": "merge"}
       }
     },
     "features": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["auto_merge", "ai_review", "ocr_review", "vision_review", "metrics"],
+      "required": ["auto_merge", "comment_review", "close_late_pr", "ai_review", "ocr_review", "vision_review", "metrics"],
       "properties": {
         "auto_merge": {"type": "boolean"},
+        "comment_review": {"type": "boolean"},
+        "close_late_pr": {"type": "boolean"},
         "ai_review": {"type": "boolean"},
         "ocr_review": {"type": "boolean"},
         "vision_review": {"type": "boolean"},
@@ -115,7 +118,6 @@
     },
     "assignments": {
       "type": "object",
-      "minProperties": 1,
       "propertyNames": {"pattern": "^[A-Za-z][A-Za-z0-9_-]{0,49}$"},
       "additionalProperties": {"$ref": "#/$defs/assignment"}
     }

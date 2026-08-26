@@ -91,7 +91,7 @@ def review_pull_request(
         "repository": snapshot.repository,
         "pr_number": snapshot.number,
         "head_sha": snapshot.current_head_sha,
-        "reviewer_version": "0.4.0",
+        "reviewer_version": "0.5.0",
     }
 
     if snapshot.captured_head_sha != snapshot.current_head_sha:
@@ -259,10 +259,26 @@ def review_pull_request(
     if snapshot.event_at > deadline:
         late_by = snapshot.event_at - deadline
         hours = int(late_by.total_seconds() // 3600)
+        metadata["late_seconds"] = int(late_by.total_seconds())
+        close_after_days = assignment.get("late_close_after_days", 7)
+        close_required = course.feature_enabled(
+            "close_late_pr"
+        ) and late_by >= dt.timedelta(days=close_after_days)
+        if close_required:
+            metadata["close_pr"] = True
         issues.append(
             _issue(
-                ReasonCode.DEADLINE_EXCEEDED,
-                f"本次 PR 事件晚于截止时间 {hours} 小时",
+                (
+                    ReasonCode.LATE_PR_CLOSE_REQUIRED
+                    if close_required
+                    else ReasonCode.DEADLINE_EXCEEDED
+                ),
+                (
+                    f"本次 PR 创建时间晚于截止时间 {hours} 小时；"
+                    f"超过 {close_after_days} 天关闭阈值"
+                    if close_required
+                    else f"本次 PR 创建时间晚于截止时间 {hours} 小时"
+                ),
             )
         )
 

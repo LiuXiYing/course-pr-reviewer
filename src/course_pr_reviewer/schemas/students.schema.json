@@ -9,7 +9,6 @@
     "version": {"const": 1},
     "students": {
       "type": "object",
-      "minProperties": 1,
       "propertyNames": {"pattern": "^[0-9]{10}$"},
       "additionalProperties": {"$ref": "#/$defs/student"}
     }

@@ -57,7 +57,7 @@ runs:
           python -m pip install --disable-pip-version-check "${REVIEWER_ACTION_PATH}[ocr]"
         fi
 
-    - name: Review pull request
+    - name: Review and publish pull request result
       id: review
       shell: bash
       env:
@@ -66,8 +66,18 @@ runs:
         PR_INFO_DIR: ${{ inputs.metadata-dir }}
         GH_TOKEN: ${{ inputs.github-token }}
         GLM_API_KEY: ${{ inputs.glm-api-key }}
-      run: >-
-        course-pr-reviewer review
-        --config "$COURSE_REVIEW_CONFIG"
-        --students "$COURSE_STUDENTS_CONFIG"
-        --metadata-dir "$PR_INFO_DIR"
+      run: |
+        set +e
+        course-pr-reviewer review \
+          --config "$COURSE_REVIEW_CONFIG" \
+          --students "$COURSE_STUDENTS_CONFIG" \
+          --metadata-dir "$PR_INFO_DIR" \
+          --result-file review-result.json
+        review_status=$?
+        set -e
+
+        course-pr-reviewer publish \
+          --config "$COURSE_REVIEW_CONFIG" \
+          --result-file review-result.json
+
+        exit "$review_status"

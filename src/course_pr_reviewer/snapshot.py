@@ -139,26 +139,67 @@ class GitHubClient:
         self.token = token
         self.api_url = api_url.rstrip("/")
 
-    def get_json(self, path: str) -> Any:
+    def request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+        expected: tuple[int, ...] = (200,),
+    ) -> Any:
+        encoded_body = (
+            json.dumps(body, ensure_ascii=False).encode("utf-8")
+            if body is not None
+            else None
+        )
         request = urllib.request.Request(
             f"{self.api_url}{path}",
+            data=encoded_body,
+            method=method,
             headers={
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
                 "X-GitHub-Api-Version": "2022-11-28",
                 "User-Agent": "course-pr-reviewer",
             },
         )
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except (
-            urllib.error.HTTPError,
-            urllib.error.URLError,
-            TimeoutError,
-            json.JSONDecodeError,
-        ) as exc:
+                if response.status not in expected:
+                    raise ReviewSystemError(
+                        f"GitHub API {method} {path} 返回 HTTP {response.status}"
+                    )
+                raw = response.read(2_000_001)
+                if len(raw) > 2_000_000:
+                    raise ReviewSystemError("GitHub API 响应超过 2 MB 安全上限")
+                if not raw:
+                    return None
+                return json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read(501).decode("utf-8", errors="replace")
+            except OSError:
+                detail = ""
+            detail = detail.replace("\n", " ")[:500]
+            suffix = f"：{detail}" if detail else ""
+            raise ReviewSystemError(
+                f"GitHub API {method} {path} 返回 HTTP {exc.code}{suffix}"
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             raise ReviewSystemError(f"GitHub API 请求失败：{exc}") from exc
+
+    def get_json(self, path: str) -> Any:
+        return self.request_json("GET", path)
+
+    def post_json(self, path: str, body: dict[str, Any]) -> Any:
+        return self.request_json("POST", path, body=body, expected=(200, 201))
+
+    def patch_json(self, path: str, body: dict[str, Any]) -> Any:
+        return self.request_json("PATCH", path, body=body, expected=(200,))
+
+    def put_json(self, path: str, body: dict[str, Any]) -> Any:
+        return self.request_json("PUT", path, body=body, expected=(200, 201))
 
     def pull_request(self, repository: str, number: int) -> dict[str, Any]:
         repo = urllib.parse.quote(repository, safe="/")
