@@ -160,6 +160,10 @@ class GlmVisionReviewerTests(unittest.TestCase):
         request = transport.calls[0]
         self.assertEqual(request["model"], "glm-4.6v-flash")
         self.assertNotIn("response_format", request)
+        self.assertIn(
+            "黄色警告或普通提示本身不构成违规",
+            request["messages"][0]["content"],
+        )
         user_content = request["messages"][1]["content"]
         payload = json.loads(user_content[0]["text"].split("\n", 1)[1])
         self.assertEqual(payload["images"][0]["file"], "result.png")

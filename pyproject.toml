@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "course-pr-reviewer"
-version = "0.6.0"
+version = "0.6.1"
 description = "Reusable, fail-closed GitHub PR reviewer for course assignments"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -3,4 +3,4 @@
 from .models import Decision, Issue, ReasonCode, ReviewResult
 
 __all__ = ["Decision", "Issue", "ReasonCode", "ReviewResult"]
-__version__ = "0.6.0"
+__version__ = "0.6.1"
