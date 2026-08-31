@@ -78,6 +78,24 @@ def _retry_after_seconds(value: str | None) -> float | None:
     return min(seconds, 120.0) if seconds >= 0 else None
 
 
+def _provider_error_code(exc: urllib.error.HTTPError) -> str | None:
+    try:
+        raw = exc.read(8193)
+        if len(raw) > 8192:
+            return None
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("error"), dict):
+        return None
+    code = payload["error"].get("code")
+    if isinstance(code, (str, int)) and not isinstance(code, bool):
+        normalized = str(code)
+        if 1 <= len(normalized) <= 32:
+            return normalized
+    return None
+
+
 def _response_schema() -> dict[str, Any]:
     path = files("course_pr_reviewer").joinpath("schemas", "ai-review.schema.json")
     return json.loads(path.read_text(encoding="utf-8"))
@@ -94,9 +112,17 @@ def _default_transport(
                 raise ReviewSystemError("GLM API HTTP 响应超过 1 MB 安全上限")
             payload = json.loads(raw_response.decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        provider_code = _provider_error_code(exc)
+        detail = (
+            f"HTTP {exc.code}，业务错误码 {provider_code}"
+            if provider_code
+            else f"HTTP {exc.code}"
+        )
         if exc.code == 429 or 500 <= exc.code < 600:
+            if provider_code in {"1113", "1121", "1304", "1308", "1310", "1311"}:
+                raise ReviewSystemError(f"GLM API 请求受限（{detail}）") from exc
             raise _TransientGlmError(
-                f"GLM API 暂时错误（HTTP {exc.code}）",
+                f"GLM API 暂时错误（{detail}）",
                 retry_after_seconds=_retry_after_seconds(
                     exc.headers.get("Retry-After") if exc.headers else None
                 ),

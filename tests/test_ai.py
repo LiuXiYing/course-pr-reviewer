@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import io
 import json
 import unittest
+import urllib.error
 from pathlib import Path
 
 from course_pr_reviewer.ai import (
     GlmAIReviewer,
     GlmClient,
     _TransientGlmError,
+    _provider_error_code,
 )
 from course_pr_reviewer.config import CourseConfiguration, load_course_config
 from course_pr_reviewer.exceptions import ReviewSystemError
@@ -260,6 +263,20 @@ class GlmClientTests(unittest.TestCase):
                 max_attempts=3,
                 max_output_tokens=100,
             )
+
+    def test_provider_error_code_is_extracted_without_exposing_message(self):
+        error = urllib.error.HTTPError(
+            "https://example.invalid",
+            429,
+            "Too Many Requests",
+            {},
+            io.BytesIO(
+                json.dumps(
+                    {"error": {"code": 1304, "message": "sensitive detail"}}
+                ).encode("utf-8")
+            ),
+        )
+        self.assertEqual(_provider_error_code(error), "1304")
 
 
 if __name__ == "__main__":
