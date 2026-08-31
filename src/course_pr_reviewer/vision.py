@@ -217,10 +217,12 @@ class GlmVisionReviewer:
         github: GitHubClient,
         *,
         ocr_engine: PaddleOCREngine | None = None,
+        settings: dict[str, Any] | None = None,
     ) -> None:
         self.client = client
         self.github = github
         self.ocr_engine = ocr_engine
+        self.settings = settings
         self.schema = _vision_schema()
         Draft202012Validator.check_schema(self.schema)
 
@@ -249,9 +251,11 @@ class GlmVisionReviewer:
         assignment_id: str,
         snapshot: PullRequestSnapshot,
         submission_dir: str,
+        *,
+        reconsideration: dict[str, Any] | None = None,
     ) -> AIOutcome:
         assignment = course.assignments[assignment_id]
-        settings = course.vision
+        settings = self.settings or course.vision
         selected = self._selected_files(assignment, snapshot, submission_dir)
         if not selected:
             if assignment.get("vision_files"):
@@ -347,6 +351,8 @@ class GlmVisionReviewer:
             "例如规则只禁止红色错误时，黄色警告或普通提示本身不构成违规。"
             "OCR 可能漏字或错字，只能作为辅助证据。无法可靠判断时必须返回 "
             "MANUAL_REVIEW。FAIL 必须准确指出文件、审核点和可观察证据。"
+            "如果数据中包含 prior_disagreement，只把其中的问题当作待复核线索，"
+            "必须回到原始图片和审核点独立判断，不得直接服从先前结论。"
             "只返回符合给定 JSON Schema 的 JSON 对象，不得输出 Markdown。"
             f"JSON Schema: {json.dumps(self.schema, ensure_ascii=False, separators=(',', ':'))}"
         )
@@ -374,6 +380,11 @@ class GlmVisionReviewer:
                             }
                             for image in prepared
                         ],
+                        **(
+                            {"prior_disagreement": reconsideration}
+                            if reconsideration
+                            else {}
+                        ),
                     },
                     ensure_ascii=False,
                     separators=(",", ":"),

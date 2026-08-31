@@ -37,18 +37,69 @@ class CourseConfigurationTests(unittest.TestCase):
         data = yaml.safe_load(
             (ROOT / "examples/course-review.yml").read_text(encoding="utf-8")
         )
-        data["ai"].update(
-            provider="gemini", model="gemini-3.5-flash-lite"
-        )
-        data["vision"].update(
-            provider="gemini", model="gemini-3.5-flash-lite"
-        )
+        for section in ("ai", "vision"):
+            data[section].pop("providers", None)
+            data[section].pop("consensus_rounds", None)
+            data[section].update(
+                provider="gemini", model="gemini-3.5-flash-lite"
+            )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "course.yml"
             path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
             course = load_course_config(path)
         self.assertEqual(course.ai["provider"], "gemini")
         self.assertEqual(course.vision["provider"], "gemini")
+
+    def test_dual_provider_consensus_is_supported(self):
+        data = yaml.safe_load(
+            (ROOT / "examples/course-review.yml").read_text(encoding="utf-8")
+        )
+        for section, glm_model in (
+            ("ai", "glm-4.7-flash"),
+            ("vision", "glm-4.6v-flash"),
+        ):
+            data[section].pop("model", None)
+            data[section]["providers"] = [
+                {"provider": "glm", "model": glm_model},
+                {"provider": "gemini", "model": "gemini-3.5-flash-lite"},
+            ]
+            data[section]["consensus_rounds"] = 3
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "course.yml"
+            path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            course = load_course_config(path)
+        self.assertEqual(
+            [item["provider"] for item in course.ai_providers], ["glm", "gemini"]
+        )
+        self.assertEqual(course.ai_consensus_rounds, 3)
+        self.assertEqual(course.vision_consensus_rounds, 3)
+
+    def test_dual_provider_names_must_be_unique(self):
+        data = yaml.safe_load(
+            (ROOT / "examples/course-review.yml").read_text(encoding="utf-8")
+        )
+        data["ai"].pop("model", None)
+        data["ai"]["providers"] = [
+            {"provider": "glm", "model": "glm-4.7-flash"},
+            {"provider": "glm", "model": "glm-4.7-flash"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "course.yml"
+            path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigurationError, "不能重复"):
+                load_course_config(path)
+
+    def test_consensus_rounds_requires_two_providers(self):
+        data = yaml.safe_load(
+            (ROOT / "examples/course-review.yml").read_text(encoding="utf-8")
+        )
+        data["ai"].pop("providers", None)
+        data["ai"]["consensus_rounds"] = 3
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "course.yml"
+            path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigurationError, "必须配置两个"):
+                load_course_config(path)
 
     def test_expected_title_uses_roster_identity(self):
         course = load_course_config(ROOT / "examples/course-review.yml")

@@ -22,7 +22,12 @@ defaults:
   late_close_after_days: 7
 
 ai:
-  model: glm-4.7-flash
+  providers:
+    - provider: glm
+      model: glm-4.7-flash
+    - provider: gemini
+      model: gemini-3.5-flash-lite
+  consensus_rounds: 3
   min_confidence: 0.8
   timeout_seconds: 60
   max_attempts: 3
@@ -37,7 +42,12 @@ ocr:
   max_text_chars: 20000
 
 vision:
-  model: glm-4.6v-flash
+  providers:
+    - provider: glm
+      model: glm-4.6v-flash
+    - provider: gemini
+      model: gemini-3.5-flash-lite
+  consensus_rounds: 3
   min_confidence: 0.85
   fail_confidence: 0.9
   timeout_seconds: 90

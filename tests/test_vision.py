@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from course_pr_reviewer.ai import GlmClient
+from course_pr_reviewer.ai import GeminiClient, GlmClient
 from course_pr_reviewer.config import CourseConfiguration, load_course_config
 from course_pr_reviewer.exceptions import InvalidStudentImage
 from course_pr_reviewer.models import Decision, ReasonCode
@@ -171,6 +171,26 @@ class GlmVisionReviewerTests(unittest.TestCase):
         decoded = base64.b64decode(user_content[2]["image_url"]["url"])
         self.assertTrue(decoded.startswith(b"\x89PNG"))
         self.assertEqual(github.calls[0][1], SHA)
+
+    def test_explicit_provider_settings_select_the_secondary_model(self):
+        transport = FakeTransport(vision_result())
+        client = GeminiClient(
+            "test-gemini-key", transport=transport, sleeper=lambda _: None
+        )
+        github = FakeGitHub(png_bytes())
+        reviewer = GlmVisionReviewer(
+            client,
+            github,
+            ocr_engine=FakeOCR(),
+            settings=dict(self.course.vision_providers[1]),
+        )
+        outcome = reviewer.review(
+            self.course, "Lab1", self.snapshot, "2023010102刘西莹/Lab1"
+        )
+        self.assertEqual(outcome.decision, Decision.PASS)
+        self.assertEqual(
+            transport.calls[0]["model"], "gemini-3.5-flash-lite"
+        )
 
     def test_vision_stage_uses_vision_review_points_when_configured(self):
         data = copy.deepcopy(self.course.data)

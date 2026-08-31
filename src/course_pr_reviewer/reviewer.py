@@ -299,7 +299,12 @@ def review_pull_request(
                 issues=(
                     _issue(
                         ReasonCode.SERVICE_ERROR,
-                        f"缺少 {course.ai['provider']} 所需 API Key 或审核器初始化失败",
+                        "缺少 "
+                        + "、".join(
+                            provider["provider"]
+                            for provider in course.ai_providers
+                        )
+                        + " 所需 API Key 或审核器初始化失败",
                     ),
                 ),
                 metadata=metadata,
@@ -315,6 +320,13 @@ def review_pull_request(
             )
         metadata["ai_provider"] = course.ai["provider"]
         metadata["ai_model"] = course.ai["model"]
+        metadata["ai_providers"] = [
+            settings["provider"] for settings in course.ai_providers
+        ]
+        metadata["ai_models"] = {
+            settings["provider"]: settings["model"]
+            for settings in course.ai_providers
+        }
         metadata.update(
             {f"ai_{key}": value for key, value in ai_outcome.metadata.items()}
         )
@@ -337,7 +349,12 @@ def review_pull_request(
                 issues=(
                     _issue(
                         ReasonCode.SERVICE_ERROR,
-                        f"缺少 {course.vision['provider']} 所需 API Key、GitHub Token "
+                        "缺少 "
+                        + "、".join(
+                            provider["provider"]
+                            for provider in course.vision_providers
+                        )
+                        + " 所需 API Key、GitHub Token "
                         "或图片审核器初始化失败",
                     ),
                 ),
@@ -363,6 +380,13 @@ def review_pull_request(
             )
         metadata["vision_provider"] = course.vision["provider"]
         metadata["vision_model"] = course.vision["model"]
+        metadata["vision_providers"] = [
+            settings["provider"] for settings in course.vision_providers
+        ]
+        metadata["vision_models"] = {
+            settings["provider"]: settings["model"]
+            for settings in course.vision_providers
+        }
         metadata.update(
             {f"vision_{key}": value for key, value in vision_outcome.metadata.items()}
         )

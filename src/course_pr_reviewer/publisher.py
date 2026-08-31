@@ -81,6 +81,35 @@ def render_comment(result: dict[str, Any]) -> str:
         "",
         _safe_markdown(result["summary"]),
     ]
+    metadata = result.get("metadata", {})
+    consensus_rows = []
+    for key, label in (
+        ("ai_consensus", "文本审核"),
+        ("vision_consensus", "图片审核"),
+    ):
+        consensus = metadata.get(key)
+        if not isinstance(consensus, dict):
+            continue
+        decisions = consensus.get("provider_decisions", {})
+        if not isinstance(decisions, dict):
+            decisions = {}
+        decision_text = "；".join(
+            f"{str(provider).upper()}={decision}"
+            for provider, decision in decisions.items()
+        )
+        rounds_used = consensus.get("rounds_used", "?")
+        max_rounds = consensus.get("max_rounds", "?")
+        row = (
+            f"- {_safe_markdown(label)}：{_safe_markdown(decision_text)}"
+            f"（第 {_safe_markdown(rounds_used)}/{_safe_markdown(max_rounds)} 轮）"
+        )
+        unavailable = consensus.get("unavailable_providers", [])
+        if consensus.get("degraded") is True and isinstance(unavailable, list):
+            names = "、".join(str(item).upper() for item in unavailable)
+            row += f"；降级运行，{_safe_markdown(names)} 暂时不可用"
+        consensus_rows.append(row)
+    if consensus_rows:
+        lines.extend(["", "### 双模型审核状态", "", *consensus_rows])
     issues = result.get("issues", [])
     if issues:
         lines.extend(["", "### 具体问题", ""])

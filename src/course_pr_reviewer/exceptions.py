@@ -13,6 +13,14 @@ class ReviewSystemError(ReviewerError):
     """The review could not be completed reliably."""
 
 
+class ProviderUnavailableError(ReviewSystemError):
+    """A configured provider is temporarily unavailable after retries."""
+
+
+class ProviderConfigurationError(ReviewSystemError):
+    """A provider cannot run because credentials or configuration are invalid."""
+
+
 class ContentLimitExceeded(ReviewerError):
     """A submission cannot be reviewed completely within configured limits."""
 

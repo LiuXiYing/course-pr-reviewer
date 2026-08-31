@@ -8,18 +8,19 @@ on:
 permissions: {}
 
 concurrency:
-  group: pr-review-${{ github.event.workflow_run.head_repository.id }}-${{ github.event.workflow_run.head_branch }}
-  cancel-in-progress: true
+  group: course-pr-review
+  cancel-in-progress: false
 
 jobs:
   review:
     if: >-
       ${{
         github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.event == 'pull_request_target' &&
         github.event.workflow_run.head_repository.full_name != null
       }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       actions: read
       contents: write
@@ -47,5 +48,6 @@ jobs:
           students-path: .github/students.yml
           metadata-dir: pr-info
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          merge-token: ${{ secrets.PAT_TOKEN }}
           glm-api-key: ${{ secrets.GLM_API_KEY }}
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}

@@ -11,6 +11,7 @@ from pathlib import Path
 from . import __version__
 from .ai import AIClient, GeminiClient, GlmAIReviewer, GlmClient
 from .config import load_course_config, load_student_roster
+from .consensus import TextConsensusReviewer, VisionConsensusReviewer
 from .exceptions import ConfigurationError, ReviewerError
 from .models import Decision, Issue, ReasonCode, ReviewResult
 from .publisher import GitHubResultPublisher, load_result
@@ -129,16 +130,44 @@ def _review(
         key = os.environ.get("GLM_API_KEY", "")
         return GlmClient(key) if key else None
 
-    ai_client = configured_client(course.ai) if needs_ai else None
-    vision_client = configured_client(course.vision) if needs_vision else None
-    ai_reviewer = (
-        GlmAIReviewer(ai_client, github) if ai_client and needs_ai else None
-    )
+    ai_reviewers = {}
+    if needs_ai:
+        for settings in course.ai_providers:
+            client = configured_client(settings)
+            if client is None:
+                ai_reviewers = {}
+                break
+            ai_reviewers[settings["provider"]] = GlmAIReviewer(
+                client, github, settings=settings
+            )
+    ai_reviewer = None
+    if len(ai_reviewers) == 1:
+        ai_reviewer = next(iter(ai_reviewers.values()))
+    elif len(ai_reviewers) == 2:
+        ai_reviewer = TextConsensusReviewer(
+            ai_reviewers, max_rounds=course.ai_consensus_rounds
+        )
+
     vision_reviewer = None
-    if vision_client and github and needs_vision:
-        ocr_engine = PaddleOCREngine(course.ocr) if needs_ocr else None
-        vision_reviewer = GlmVisionReviewer(
-            vision_client, github, ocr_engine=ocr_engine
+    vision_reviewers = {}
+    if github and needs_vision:
+        for settings in course.vision_providers:
+            client = configured_client(settings)
+            if client is None:
+                vision_reviewers = {}
+                break
+            ocr_engine = PaddleOCREngine(course.ocr) if needs_ocr else None
+            vision_reviewers[settings["provider"]] = GlmVisionReviewer(
+                client,
+                github,
+                ocr_engine=ocr_engine,
+                settings=settings,
+            )
+    if len(vision_reviewers) == 1:
+        vision_reviewer = next(iter(vision_reviewers.values()))
+    elif len(vision_reviewers) == 2:
+        vision_reviewer = VisionConsensusReviewer(
+            vision_reviewers, max_rounds=course.vision_consensus_rounds
         )
     result = review_pull_request(
         course,

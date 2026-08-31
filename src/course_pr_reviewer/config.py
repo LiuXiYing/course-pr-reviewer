@@ -66,8 +66,35 @@ class CourseConfiguration:
             "max_total_bytes": 500_000,
             "max_output_tokens": 2048,
         }
-        defaults.update(self.data.get("ai", {}))
+        configured = self.data.get("ai", {})
+        defaults.update(
+            {
+                key: value
+                for key, value in configured.items()
+                if key not in {"providers", "consensus_rounds"}
+            }
+        )
+        providers = configured.get("providers")
+        if providers:
+            defaults.update(providers[0])
         return defaults
+
+    @property
+    def ai_providers(self) -> tuple[dict[str, Any], ...]:
+        configured = self.data.get("ai", {})
+        providers = configured.get("providers")
+        if not providers:
+            return (self.ai,)
+        common = {
+            key: value
+            for key, value in self.ai.items()
+            if key not in {"provider", "model"}
+        }
+        return tuple({**common, **provider} for provider in providers)
+
+    @property
+    def ai_consensus_rounds(self) -> int:
+        return int(self.data.get("ai", {}).get("consensus_rounds", 1))
 
     @property
     def ocr(self) -> dict[str, Any]:
@@ -96,8 +123,35 @@ class CourseConfiguration:
             "max_side": 4096,
             "max_output_tokens": 2048,
         }
-        defaults.update(self.data.get("vision", {}))
+        configured = self.data.get("vision", {})
+        defaults.update(
+            {
+                key: value
+                for key, value in configured.items()
+                if key not in {"providers", "consensus_rounds"}
+            }
+        )
+        providers = configured.get("providers")
+        if providers:
+            defaults.update(providers[0])
         return defaults
+
+    @property
+    def vision_providers(self) -> tuple[dict[str, Any], ...]:
+        configured = self.data.get("vision", {})
+        providers = configured.get("providers")
+        if not providers:
+            return (self.vision,)
+        common = {
+            key: value
+            for key, value in self.vision.items()
+            if key not in {"provider", "model"}
+        }
+        return tuple({**common, **provider} for provider in providers)
+
+    @property
+    def vision_consensus_rounds(self) -> int:
+        return int(self.data.get("vision", {}).get("consensus_rounds", 1))
 
     def assignment(self, assignment_id: str) -> dict[str, Any] | None:
         return self.assignments.get(assignment_id)
@@ -267,12 +321,34 @@ def load_course_config(path: str | Path) -> CourseConfiguration:
                 raise ConfigurationError(
                     f"{assignment_id} 包含不安全图片模式：{pattern}"
                 )
-    vision = CourseConfiguration(data).vision
+    course = CourseConfiguration(data)
+    for section_name, providers in (
+        ("ai", course.ai_providers),
+        ("vision", course.vision_providers),
+    ):
+        names = [provider["provider"] for provider in providers]
+        if len(names) != len(set(names)):
+            raise ConfigurationError(
+                f"{section_name}.providers 不能重复配置同一个提供商"
+            )
+        configured = data.get(section_name, {})
+        if "providers" in configured and any(
+            key in configured for key in ("provider", "model")
+        ):
+            raise ConfigurationError(
+                f"{section_name} 使用 providers 时不能同时配置 provider 或 model"
+            )
+        rounds = configured.get("consensus_rounds", 1)
+        if len(providers) == 1 and rounds != 1:
+            raise ConfigurationError(
+                f"{section_name}.consensus_rounds 大于 1 时必须配置两个提供商"
+            )
+    vision = course.vision
     if vision["fail_confidence"] < vision["min_confidence"]:
         raise ConfigurationError(
             "vision.fail_confidence 不能低于 vision.min_confidence"
         )
-    return CourseConfiguration(data)
+    return course
 
 
 def load_student_roster(path: str | Path) -> StudentRoster:

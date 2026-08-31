@@ -246,6 +246,25 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("@\u200beveryone", body)
         self.assertIn("\\*\\*不要通过\\*\\*", body)
 
+    def test_comment_shows_dual_model_and_degraded_status(self):
+        body = render_comment(
+            result_dict(
+                metadata={
+                    "ai_consensus": {
+                        "rounds_used": 1,
+                        "max_rounds": 3,
+                        "degraded": True,
+                        "provider_decisions": {"gemini": "PASS"},
+                        "unavailable_providers": ["glm"],
+                    }
+                }
+            )
+        )
+        self.assertIn("双模型审核状态", body)
+        self.assertIn("GEMINI", body)
+        self.assertIn("GLM", body)
+        self.assertIn("降级运行", body)
+
     def test_result_file_is_schema_validated(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "result.json"

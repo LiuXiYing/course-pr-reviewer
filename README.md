@@ -2,14 +2,14 @@
 
 面向课程作业仓库的通用 GitHub PR 审核器。每个课程只维护作业配置和学生名单，身份校验、确定性规则、AI、OCR 和视觉审核由一个版本化 Action 复用。
 
-> 当前状态：`0.6.1`。确定性规则、Gemini/GLM 三态文本与图片审核、可选本地 PaddleOCR、PR 评论、自动合并和超期关闭均已实现。
+> 当前状态：`0.9.0`。确定性规则、Gemini/GLM 双模型共识审核、可选本地 PaddleOCR、PR 评论、自动合并和超期关闭均已实现。
 
 ## 设计原则
 
 - 学生身份来自经过教师确认的 GitHub 账号映射，不能由 PR 标题冒充。
 - PR 标题仍然严格校验，便于教师直接查看。
 - 只有 `PASS` 可以自动合并；不确定结果进入 `MANUAL_REVIEW`。
-- GitHub、AI、OCR 或配置异常必须失败关闭。
+- 双模型均不可用、GitHub、OCR 或配置异常必须失败关闭；单模型临时不可用时显式降级并记录。
 - 审核哪个 head SHA，就只能合并哪个 SHA。
 - 评论使用固定标记幂等更新，不重复刷屏。
 - 截止时间使用 PR 首次创建时间；达到关闭阈值后自动评论并关闭。
@@ -91,17 +91,23 @@ course-pr-reviewer validate \
 
 稳定的原因代码定义在 [`models.py`](src/course_pr_reviewer/models.py)，所有运行结果遵守 `review-result.schema.json`。
 
-## Gemini 或 GLM 文本审核
+## Gemini 与 GLM 双模型审核
 
-每个阶段通过 `provider` 选择 `gemini` 或 `glm`。审核器使用 JSON 模式，并在本地再用 `ai-review.schema.json` 校验响应。Gemini 文本和图片可共用 `gemini-3.5-flash-lite`。
+文本和图片阶段都可以配置 GLM 与 Gemini 两个提供商。两个模型在每一轮独立审核；意见不一致时最多重新审核三轮，三轮后仍不一致则进入 `MANUAL_REVIEW`。两个模型均通过才自动通过，均拒绝则合并可复核的问题；一个模型临时不可用时采用另一个模型的结果并在 PR 评论中标记降级状态，两个模型均不可用时暂停合并。
+
+缺少密钥、鉴权失败或模型名配置错误属于配置故障，不允许降级为单模型。API 超时、429 或服务端临时错误在内部重试耗尽后才属于可降级故障。
 
 ```yaml
 features:
   ai_review: true
 
 ai:
-  provider: gemini
-  model: gemini-3.5-flash-lite
+  providers:
+    - provider: glm
+      model: glm-4.7-flash
+    - provider: gemini
+      model: gemini-3.5-flash-lite
+  consensus_rounds: 3
   min_confidence: 0.8
   timeout_seconds: 60
   max_attempts: 3
@@ -122,7 +128,7 @@ ai:
 
 PaddleOCR 在 GitHub Actions runner 本地运行，不需要任何 OCR 密钥。Action 仅在课程配置实际启用 `ocr_review` 时安装 `paddleocr==3.7.0` 和 `paddlepaddle==3.3.1`。首次运行会下载所配置的 OCR 模型。
 
-默认使用体积与准确率较平衡的 `PP-OCRv6_small_det` 和 `PP-OCRv6_small_rec`。OCR 只负责提取截图文字；清洗后的图片和 OCR 结果一起交给所选多模态模型判断。`ocr_review: false` 时不安装 PaddleOCR，Gemini 直接读取图片。
+默认使用体积与准确率较平衡的 `PP-OCRv6_small_det` 和 `PP-OCRv6_small_rec`。OCR 只负责提取截图文字；清洗后的图片和 OCR 结果一起交给所选多模态模型判断。`ocr_review: false` 时不安装 PaddleOCR，GLM 与 Gemini 直接读取图片。
 
 ```yaml
 features:
@@ -136,8 +142,12 @@ ocr:
   max_text_chars: 20000
 
 vision:
-  provider: gemini
-  model: gemini-3.5-flash-lite
+  providers:
+    - provider: glm
+      model: glm-4.6v-flash
+    - provider: gemini
+      model: gemini-3.5-flash-lite
+  consensus_rounds: 3
   min_confidence: 0.85
   fail_confidence: 0.9
   max_images: 6
@@ -154,11 +164,12 @@ assignments:
 
 `ocr_review` 必须与 `vision_review` 一起启用。审核器只读取当前 PR head 中精确 blob SHA 对应的图片；图片会先检查格式、像素数、多帧、解压炸弹和大小，再统一转成不含元数据的 PNG。AI 只收到作业内的相对图片文件名，不收到学号或姓名。
 
-图片 `FAIL` 使用更高的 `fail_confidence` 阈值。OCR 类问题的证据还必须能在 PaddleOCR 结果中逐字复核，否则降级为 `MANUAL_REVIEW`。模型或 OCR 服务异常返回 `ERROR`。
+图片 `FAIL` 使用更高的 `fail_confidence` 阈值。OCR 类问题的证据还必须能在 PaddleOCR 结果中逐字复核，否则降级为 `MANUAL_REVIEW`。双模型的临时故障按共识规则降级；两个审核通道均不可用时返回 `ERROR`。
 
-Gemini 文本和图片审核共用一个 API Key。它只保存为课程仓库的 GitHub Actions Secret：
+GLM 和 Gemini 的文本、图片审核分别共用自己的 API Key。密钥只保存为课程仓库的 GitHub Actions Secret：
 
 ```bash
+gh secret set GLM_API_KEY
 gh secret set GEMINI_API_KEY
 ```
 
@@ -194,12 +205,14 @@ gh secret set GEMINI_API_KEY
     students-path: .github/students.yml
     metadata-dir: pr-info
     github-token: ${{ secrets.GITHUB_TOKEN }}
+    merge-token: ${{ secrets.PAT_TOKEN }}
+    glm-api-key: ${{ secrets.GLM_API_KEY }}
     gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
 ```
 
 安全调用分为两个工作流：
 
-1. [`examples/caller-collect.yml`](examples/caller-collect.yml) 在低权限 `pull_request` 中收集可信 PR 元数据。
+1. [`examples/caller-collect.yml`](examples/caller-collect.yml) 使用受信任默认分支上的 `pull_request_target` 读取事件元数据，不检出或执行学生代码，fork PR 无需逐次审批。
 2. [`examples/caller-review.yml`](examples/caller-review.yml) 在 `workflow_run` 中检出默认分支、重新读取 GitHub API 的当前 PR 数据并运行共享审核器。
 
 高权限阶段不检出、导入或执行学生 PR 内的任何代码。不要在正式课程中引用可移动的 `main` 标签。

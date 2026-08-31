@@ -1,7 +1,9 @@
 name: PR 信息收集
+run-name: "PR 信息收集 #${{ github.event.pull_request.number }}"
 
 on:
-  pull_request:
+  # Only read event metadata. Never check out or execute pull-request content here.
+  pull_request_target:
     types: [opened, synchronize, reopened, edited]
 
 permissions:
@@ -14,6 +16,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
       - name: Write trusted event metadata
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7

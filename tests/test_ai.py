@@ -101,6 +101,18 @@ class GlmAIReviewerTests(unittest.TestCase):
         )
         self.assertEqual(untrusted_payload["files"][0]["content"], self.content)
 
+    def test_explicit_provider_settings_select_the_secondary_model(self):
+        transport = FakeTransport(model_result())
+        client = GeminiClient(
+            "test-gemini-key", transport=transport, sleeper=lambda _: None
+        )
+        settings = dict(self.course.ai_providers[1])
+        reviewer = GlmAIReviewer(client, settings=settings)
+        outcome = reviewer.review(self.course, "Lab1", self.snapshot)
+        self.assertEqual(outcome.decision, Decision.PASS)
+        request = json.loads(transport.calls[0][2])
+        self.assertEqual(request["model"], "gemini-3.5-flash-lite")
+
     def test_fail_requires_verifiable_evidence(self):
         issue = {
             "category": "CONTENT_VIOLATION",
