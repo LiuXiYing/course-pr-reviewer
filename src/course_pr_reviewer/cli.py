@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 
+from . import __version__
 from .ai import GlmAIReviewer, GlmClient
 from .config import load_course_config, load_student_roster
 from .exceptions import ConfigurationError, ReviewerError
@@ -145,7 +146,7 @@ def _write_error_result(message: str, result_file: str, code: ReasonCode) -> Non
         decision=Decision.ERROR,
         summary="审核器无法可靠地完成本次审核。",
         issues=(Issue(code=code, message=message),),
-        metadata={"reviewer_version": "0.5.0"},
+        metadata={"reviewer_version": __version__},
     )
     Path(result_file).write_text(result.to_json() + "\n", encoding="utf-8")
     _write_github_output(result)

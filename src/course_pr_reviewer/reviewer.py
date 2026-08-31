@@ -7,6 +7,7 @@ import re
 import string
 from pathlib import PurePosixPath
 
+from . import __version__
 from .ai import GlmAIReviewer
 from .config import CourseConfiguration, Student, StudentRoster
 from .exceptions import InvalidStudentImage, ReviewSystemError
@@ -91,7 +92,7 @@ def review_pull_request(
         "repository": snapshot.repository,
         "pr_number": snapshot.number,
         "head_sha": snapshot.current_head_sha,
-        "reviewer_version": "0.5.0",
+        "reviewer_version": __version__,
     }
 
     if snapshot.captured_head_sha != snapshot.current_head_sha:
