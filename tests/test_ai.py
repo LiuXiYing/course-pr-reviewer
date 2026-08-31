@@ -146,6 +146,29 @@ class GlmAIReviewerTests(unittest.TestCase):
         self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
         self.assertEqual(outcome.issues[0].code, ReasonCode.AI_UNCERTAIN)
 
+    def test_issues_about_non_text_files_are_dropped_in_text_stage(self):
+        image_path = "2023010102刘西莹/Lab1/imgs/clion-toolchain.png"
+        snapshot = copy.copy(self.snapshot)
+        object.__setattr__(
+            snapshot,
+            "files",
+            (
+                ChangedFile(self.path, "added", content=self.content),
+                ChangedFile(image_path, "added", content=None),
+            ),
+        )
+        issue = {
+            "category": "CONTENT_VIOLATION",
+            "message": "无法读取截图内容",
+            "file": image_path,
+            "evidence": "截图未提供",
+            "rule": "截图必须清晰显示工具链设置",
+        }
+        reviewer, _ = self.reviewer(model_result("FAIL", issues=[issue]))
+        outcome = reviewer.review(self.course, "Lab1", snapshot)
+        self.assertEqual(outcome.decision, Decision.PASS)
+        self.assertEqual(outcome.issues, ())
+
     def test_low_confidence_is_manual_even_if_model_says_pass(self):
         reviewer, _ = self.reviewer(model_result(confidence=0.4))
         outcome = reviewer.review(self.course, "Lab1", self.snapshot)

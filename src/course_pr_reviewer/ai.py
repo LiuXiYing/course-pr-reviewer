@@ -500,6 +500,11 @@ class GlmAIReviewer:
         model_decision = Decision(parsed["decision"])
         confidence = float(parsed["confidence"])
         raw_issues = parsed["issues"]
+        # 纯文本阶段拿不到图片内容，模型仍可能对 non_text_files 报问题。
+        # 这类问题无法在此阶段复核，交由视觉阶段判定，这里直接丢弃。
+        raw_issues = [item for item in raw_issues if item["file"] in content_by_file]
+        if not raw_issues and model_decision is not Decision.PASS:
+            model_decision = Decision.PASS
         if model_decision is Decision.FAIL:
             definite_issues = [
                 item for item in raw_issues if item["category"] != "UNCERTAIN"
