@@ -295,11 +295,11 @@ def review_pull_request(
         if ai_reviewer is None:
             return ReviewResult(
                 decision=Decision.ERROR,
-                summary="已启用 AI 审核，但 GLM 审核器未正确配置。",
+                summary="已启用 AI 审核，但所选 AI 审核器未正确配置。",
                 issues=(
                     _issue(
                         ReasonCode.SERVICE_ERROR,
-                        "缺少 GLM_API_KEY 或 GLM 审核器初始化失败",
+                        f"缺少 {course.ai['provider']} 所需 API Key 或审核器初始化失败",
                     ),
                 ),
                 metadata=metadata,
@@ -309,10 +309,11 @@ def review_pull_request(
         except ReviewSystemError as exc:
             return ReviewResult(
                 decision=Decision.ERROR,
-                summary="GLM 内容审核无法可靠完成。",
+                summary="AI 内容审核无法可靠完成。",
                 issues=(_issue(ReasonCode.SERVICE_ERROR, str(exc)),),
                 metadata=metadata,
             )
+        metadata["ai_provider"] = course.ai["provider"]
         metadata["ai_model"] = course.ai["model"]
         metadata.update(
             {f"ai_{key}": value for key, value in ai_outcome.metadata.items()}
@@ -332,11 +333,12 @@ def review_pull_request(
         if vision_reviewer is None:
             return ReviewResult(
                 decision=Decision.ERROR,
-                summary="已启用图片审核，但 GLM 图片审核器未正确配置。",
+                summary="已启用图片审核，但所选图片审核器未正确配置。",
                 issues=(
                     _issue(
                         ReasonCode.SERVICE_ERROR,
-                        "缺少 GLM_API_KEY、GitHub Token 或图片审核器初始化失败",
+                        f"缺少 {course.vision['provider']} 所需 API Key、GitHub Token "
+                        "或图片审核器初始化失败",
                     ),
                 ),
                 metadata=metadata,
@@ -355,10 +357,11 @@ def review_pull_request(
         except ReviewSystemError as exc:
             return ReviewResult(
                 decision=Decision.ERROR,
-                summary="PaddleOCR 或 GLM 图片审核无法可靠完成。",
+                summary="OCR 或 AI 图片审核无法可靠完成。",
                 issues=(_issue(ReasonCode.SERVICE_ERROR, str(exc)),),
                 metadata=metadata,
             )
+        metadata["vision_provider"] = course.vision["provider"]
         metadata["vision_model"] = course.vision["model"]
         metadata.update(
             {f"vision_{key}": value for key, value in vision_outcome.metadata.items()}

@@ -48,3 +48,4 @@ jobs:
           metadata-dir: pr-info
           github-token: ${{ secrets.GITHUB_TOKEN }}
           glm-api-key: ${{ secrets.GLM_API_KEY }}
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}

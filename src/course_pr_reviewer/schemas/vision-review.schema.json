@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/LiuXiYing/course-pr-reviewer/schemas/vision-review.schema.json",
-  "title": "GLM course assignment image review response",
+  "title": "AI course assignment image review response",
   "type": "object",
   "additionalProperties": false,
   "required": ["decision", "summary", "confidence", "issues"],

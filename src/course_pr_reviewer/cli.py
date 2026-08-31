@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .ai import GlmAIReviewer, GlmClient
+from .ai import AIClient, GeminiClient, GlmAIReviewer, GlmClient
 from .config import load_course_config, load_student_roster
 from .exceptions import ConfigurationError, ReviewerError
 from .models import Decision, Issue, ReasonCode, ReviewResult
@@ -112,7 +112,6 @@ def _review(
         course.assignment_feature_enabled(assignment_id, "ocr_review")
         for assignment_id in course.assignments
     )
-    api_key = os.environ.get("GLM_API_KEY", "")
     github_token = os.environ.get("GH_TOKEN", "")
     github = (
         GitHubClient(
@@ -122,12 +121,25 @@ def _review(
         if github_token
         else None
     )
-    glm = GlmClient(api_key) if api_key and (needs_ai or needs_vision) else None
-    ai_reviewer = GlmAIReviewer(glm, github) if glm and needs_ai else None
+    def configured_client(settings: dict) -> AIClient | None:
+        provider = settings["provider"]
+        if provider == "gemini":
+            key = os.environ.get("GEMINI_API_KEY", "")
+            return GeminiClient(key) if key else None
+        key = os.environ.get("GLM_API_KEY", "")
+        return GlmClient(key) if key else None
+
+    ai_client = configured_client(course.ai) if needs_ai else None
+    vision_client = configured_client(course.vision) if needs_vision else None
+    ai_reviewer = (
+        GlmAIReviewer(ai_client, github) if ai_client and needs_ai else None
+    )
     vision_reviewer = None
-    if glm and github and needs_vision:
+    if vision_client and github and needs_vision:
         ocr_engine = PaddleOCREngine(course.ocr) if needs_ocr else None
-        vision_reviewer = GlmVisionReviewer(glm, github, ocr_engine=ocr_engine)
+        vision_reviewer = GlmVisionReviewer(
+            vision_client, github, ocr_engine=ocr_engine
+        )
     result = review_pull_request(
         course,
         roster,

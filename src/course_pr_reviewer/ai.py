@@ -1,4 +1,4 @@
-"""GLM-backed text review with strict, fail-closed structured output."""
+"""AI-backed text review with strict, fail-closed structured output."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 
 from jsonschema import Draft202012Validator
 
@@ -20,6 +20,9 @@ from .models import Decision, Issue, ReasonCode
 from .snapshot import GitHubClient, PullRequestSnapshot
 
 GLM_ENDPOINT = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+GEMINI_ENDPOINT = (
+    "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+)
 BINARY_SUFFIXES = {
     ".7z",
     ".avi",
@@ -60,7 +63,7 @@ class AIOutcome:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class _TransientGlmError(Exception):
+class _TransientAIError(Exception):
     def __init__(
         self, message: str, *, retry_after_seconds: float | None = None
     ) -> None:
@@ -78,7 +81,9 @@ def _retry_after_seconds(value: str | None) -> float | None:
     return min(seconds, 120.0) if seconds >= 0 else None
 
 
-def _provider_error_code(exc: urllib.error.HTTPError) -> str | None:
+def _provider_error_value(
+    exc: urllib.error.HTTPError, field: str
+) -> str | None:
     try:
         raw = exc.read(8193)
         if len(raw) > 8192:
@@ -88,12 +93,16 @@ def _provider_error_code(exc: urllib.error.HTTPError) -> str | None:
         return None
     if not isinstance(payload, dict) or not isinstance(payload.get("error"), dict):
         return None
-    code = payload["error"].get("code")
-    if isinstance(code, (str, int)) and not isinstance(code, bool):
-        normalized = str(code)
+    value = payload["error"].get(field)
+    if isinstance(value, (str, int)) and not isinstance(value, bool):
+        normalized = str(value)
         if 1 <= len(normalized) <= 32:
             return normalized
     return None
+
+
+def _provider_error_code(exc: urllib.error.HTTPError) -> str | None:
+    return _provider_error_value(exc, "code")
 
 
 def _response_schema() -> dict[str, Any]:
@@ -121,7 +130,7 @@ def _default_transport(
         if exc.code == 429 or 500 <= exc.code < 600:
             if provider_code in {"1113", "1121", "1304", "1308", "1310", "1311"}:
                 raise ReviewSystemError(f"GLM API 请求受限（{detail}）") from exc
-            raise _TransientGlmError(
+            raise _TransientAIError(
                 f"GLM API 暂时错误（{detail}）",
                 retry_after_seconds=_retry_after_seconds(
                     exc.headers.get("Retry-After") if exc.headers else None
@@ -129,12 +138,57 @@ def _default_transport(
             ) from exc
         raise ReviewSystemError(f"GLM API 请求失败（HTTP {exc.code}）") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise _TransientGlmError("GLM API 连接或超时错误") from exc
+        raise _TransientAIError("GLM API 连接或超时错误") from exc
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ReviewSystemError("GLM API 返回的 HTTP 响应不是有效 JSON") from exc
     if not isinstance(payload, dict):
         raise ReviewSystemError("GLM API 返回的 HTTP 响应格式无效")
     return payload
+
+
+def _gemini_transport(
+    url: str, headers: dict[str, str], body: bytes, timeout: int
+) -> dict[str, Any]:
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw_response = response.read(1_000_001)
+            if len(raw_response) > 1_000_000:
+                raise ReviewSystemError("Gemini API HTTP 响应超过 1 MB 安全上限")
+            payload = json.loads(raw_response.decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        status = _provider_error_value(exc, "status")
+        detail = f"HTTP {exc.code}" + (f"，状态 {status}" if status else "")
+        if exc.code == 429 or 500 <= exc.code < 600:
+            raise _TransientAIError(
+                f"Gemini API 暂时错误（{detail}）",
+                retry_after_seconds=_retry_after_seconds(
+                    exc.headers.get("Retry-After") if exc.headers else None
+                ),
+            ) from exc
+        raise ReviewSystemError(f"Gemini API 请求失败（{detail}）") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise _TransientAIError("Gemini API 连接或超时错误") from exc
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ReviewSystemError("Gemini API 返回的 HTTP 响应不是有效 JSON") from exc
+    if not isinstance(payload, dict):
+        raise ReviewSystemError("Gemini API 返回的 HTTP 响应格式无效")
+    return payload
+
+
+class AIClient(Protocol):
+    def complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        timeout_seconds: int,
+        max_attempts: int,
+        max_output_tokens: int,
+        json_mode: bool = True,
+    ) -> dict[str, Any]: ...
+
+    def image_url(self, data: bytes) -> str: ...
 
 
 class GlmClient:
@@ -184,7 +238,7 @@ class GlmClient:
         for attempt in range(1, max_attempts + 1):
             try:
                 return self._transport(self._endpoint, headers, body, timeout_seconds)
-            except _TransientGlmError as exc:
+            except _TransientAIError as exc:
                 if attempt == max_attempts:
                     raise ReviewSystemError(
                         f"GLM API 在 {max_attempts} 次尝试后仍不可用：{exc}"
@@ -197,9 +251,84 @@ class GlmClient:
                 self._sleeper(delay)
         raise AssertionError("unreachable")
 
+    @staticmethod
+    def image_url(data: bytes) -> str:
+        import base64
+
+        return base64.b64encode(data).decode("ascii")
+
+
+class GeminiClient:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        endpoint: str = GEMINI_ENDPOINT,
+        transport: Transport = _gemini_transport,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        api_key = api_key.strip()
+        if not api_key:
+            raise ReviewSystemError("已启用 Gemini 审核，但未配置 GEMINI_API_KEY")
+        self._api_key = api_key
+        self._endpoint = endpoint
+        self._transport = transport
+        self._sleeper = sleeper
+
+    def complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        timeout_seconds: int,
+        max_attempts: int,
+        max_output_tokens: int,
+        json_mode: bool = True,
+    ) -> dict[str, Any]:
+        request_data: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "reasoning_effort": "minimal",
+            "temperature": 0.1,
+            "max_tokens": max_output_tokens,
+            "stream": False,
+            # Gemini's OpenAI-compatible endpoint supports JSON object output for
+            # both text-only and multimodal requests. Local schema validation is
+            # still authoritative and fail-closed.
+            "response_format": {"type": "json_object"},
+        }
+        body = json.dumps(request_data, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "course-pr-reviewer",
+        }
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self._transport(self._endpoint, headers, body, timeout_seconds)
+            except _TransientAIError as exc:
+                if attempt == max_attempts:
+                    raise ReviewSystemError(
+                        f"Gemini API 在 {max_attempts} 次尝试后仍不可用：{exc}"
+                    ) from exc
+                delay = (
+                    exc.retry_after_seconds
+                    if exc.retry_after_seconds is not None
+                    else float(min(5 * (2 ** (attempt - 1)), 60))
+                )
+                self._sleeper(delay)
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    def image_url(data: bytes) -> str:
+        import base64
+
+        return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
 
 class GlmAIReviewer:
-    def __init__(self, client: GlmClient, github: GitHubClient | None = None) -> None:
+    def __init__(self, client: AIClient, github: GitHubClient | None = None) -> None:
         self.client = client
         self.github = github
         self.schema = _response_schema()
@@ -266,7 +395,7 @@ class GlmAIReviewer:
         if not content_by_file:
             return AIOutcome(
                 decision=Decision.PASS,
-                summary="本次提交没有需要 GLM 审核的文本文件。",
+                summary="本次提交没有需要 AI 审核的文本文件。",
                 metadata={"ai_skipped": "no_text_files"},
             )
 
@@ -322,7 +451,7 @@ class GlmAIReviewer:
                 or "<root>"
             )
             raise ReviewSystemError(
-                f"GLM 结构化输出未通过 Schema 验证：{location}: "
+                f"AI 结构化输出未通过 Schema 验证：{location}: "
                 f"{validation_errors[0].message}"
             )
         return self._outcome(parsed, content_by_file, response_metadata, settings)
@@ -335,16 +464,16 @@ class GlmAIReviewer:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ReviewSystemError(
-                "GLM API 响应缺少 choices[0].message.content"
+                "AI API 响应缺少 choices[0].message.content"
             ) from exc
         if not isinstance(content, str):
-            raise ReviewSystemError("GLM API 的 message.content 不是文本")
+            raise ReviewSystemError("AI API 的 message.content 不是文本")
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError as exc:
-            raise ReviewSystemError("GLM message.content 不是有效 JSON") from exc
+            raise ReviewSystemError("AI message.content 不是有效 JSON") from exc
         if not isinstance(parsed, dict):
-            raise ReviewSystemError("GLM message.content 顶层必须是 JSON 对象")
+            raise ReviewSystemError("AI message.content 顶层必须是 JSON 对象")
         metadata: dict[str, Any] = {}
         usage = response.get("usage")
         if isinstance(usage, dict):
@@ -358,7 +487,7 @@ class GlmAIReviewer:
                     metadata[key] = value
         response_id = response.get("id")
         if isinstance(response_id, str) and response_id:
-            metadata["glm_response_id"] = response_id
+            metadata["response_id"] = response_id
         return parsed, metadata
 
     @staticmethod
@@ -380,11 +509,11 @@ class GlmAIReviewer:
             elif raw_issues:
                 return AIOutcome(
                     decision=Decision.MANUAL_REVIEW,
-                    summary="GLM 的失败结论只包含不确定项，已阻止自动判定。",
+                    summary="AI 的失败结论只包含不确定项，已阻止自动判定。",
                     issues=(
                         Issue(
                             code=ReasonCode.AI_UNCERTAIN,
-                            message="GLM 返回 FAIL，但没有给出确定性问题",
+                            message="AI 返回 FAIL，但没有给出确定性问题",
                         ),
                     ),
                     confidence=confidence,
@@ -395,11 +524,11 @@ class GlmAIReviewer:
         ):
             return AIOutcome(
                 decision=Decision.MANUAL_REVIEW,
-                summary="GLM 返回的人工复核结论与问题类型不一致，已保持安全拦截。",
+                summary="AI 返回的人工复核结论与问题类型不一致，已保持安全拦截。",
                 issues=(
                     Issue(
                         code=ReasonCode.AI_UNCERTAIN,
-                        message="GLM 的 MANUAL_REVIEW 结果包含确定性问题，需要重新审核",
+                        message="AI 的 MANUAL_REVIEW 结果包含确定性问题，需要重新审核",
                     ),
                 ),
                 confidence=confidence,
@@ -415,7 +544,7 @@ class GlmAIReviewer:
         if unsupported_evidence:
             return AIOutcome(
                 decision=Decision.MANUAL_REVIEW,
-                summary="GLM 返回的部分证据无法在学生文件中复核。",
+                summary="AI 返回的部分证据无法在学生文件中复核。",
                 issues=(
                     Issue(
                         code=ReasonCode.AI_UNCERTAIN,
@@ -430,7 +559,7 @@ class GlmAIReviewer:
         if confidence < settings["min_confidence"]:
             return AIOutcome(
                 decision=Decision.MANUAL_REVIEW,
-                summary=f"GLM 置信度 {confidence:.2f} 低于阈值 {settings['min_confidence']:.2f}。",
+                summary=f"AI 置信度 {confidence:.2f} 低于阈值 {settings['min_confidence']:.2f}。",
                 issues=(
                     Issue(
                         code=ReasonCode.AI_UNCERTAIN,

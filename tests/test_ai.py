@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import datetime as dt
 import io
@@ -9,9 +10,11 @@ import urllib.error
 from pathlib import Path
 
 from course_pr_reviewer.ai import (
+    GEMINI_ENDPOINT,
+    GeminiClient,
     GlmAIReviewer,
     GlmClient,
-    _TransientGlmError,
+    _TransientAIError,
     _provider_error_code,
 )
 from course_pr_reviewer.config import CourseConfiguration, load_course_config
@@ -31,7 +34,7 @@ class FakeTransport:
     def __call__(self, url, headers, body, timeout):
         self.calls.append((url, headers, body, timeout))
         if len(self.calls) <= self.transient_failures:
-            raise _TransientGlmError("temporary")
+            raise _TransientAIError("temporary")
         return {
             "id": "glm-test-response",
             "choices": [
@@ -261,7 +264,7 @@ class GlmClientTests(unittest.TestCase):
             nonlocal calls
             calls += 1
             if calls < 3:
-                raise _TransientGlmError("GLM API 暂时错误（HTTP 429）")
+                raise _TransientAIError("GLM API 暂时错误（HTTP 429）")
             return {"choices": [{"message": {"content": "{}"}}]}
 
         client = GlmClient("test-key", transport=transport, sleeper=delays.append)
@@ -276,7 +279,7 @@ class GlmClientTests(unittest.TestCase):
 
     def test_final_transient_error_preserves_safe_status_detail(self):
         def transport(url, headers, body, timeout):
-            raise _TransientGlmError("GLM API 暂时错误（HTTP 429）")
+            raise _TransientAIError("GLM API 暂时错误（HTTP 429）")
 
         client = GlmClient("test-key", transport=transport, sleeper=lambda _: None)
         with self.assertRaisesRegex(ReviewSystemError, "HTTP 429"):
@@ -301,6 +304,40 @@ class GlmClientTests(unittest.TestCase):
             ),
         )
         self.assertEqual(_provider_error_code(error), "1304")
+
+
+class GeminiClientTests(unittest.TestCase):
+    def test_missing_key_is_rejected(self):
+        with self.assertRaisesRegex(ReviewSystemError, "GEMINI_API_KEY"):
+            GeminiClient("")
+
+    def test_openai_compatible_request_uses_json_mode(self):
+        transport = FakeTransport(model_result())
+        client = GeminiClient(
+            "test-gemini-key", transport=transport, sleeper=lambda _: None
+        )
+        response = client.complete(
+            model="gemini-3.5-flash-lite",
+            messages=[{"role": "user", "content": "test"}],
+            timeout_seconds=60,
+            max_attempts=3,
+            max_output_tokens=1000,
+            json_mode=False,
+        )
+        self.assertIn("choices", response)
+        url, headers, raw_body, timeout = transport.calls[0]
+        self.assertEqual(url, GEMINI_ENDPOINT)
+        self.assertEqual(headers["Authorization"], "Bearer test-gemini-key")
+        self.assertEqual(timeout, 60)
+        body = json.loads(raw_body)
+        self.assertEqual(body["model"], "gemini-3.5-flash-lite")
+        self.assertEqual(body["reasoning_effort"], "minimal")
+        self.assertEqual(body["response_format"], {"type": "json_object"})
+
+    def test_png_is_encoded_as_data_url(self):
+        url = GeminiClient.image_url(b"\x89PNG")
+        self.assertTrue(url.startswith("data:image/png;base64,"))
+        self.assertEqual(base64.b64decode(url.split(",", 1)[1]), b"\x89PNG")
 
 
 if __name__ == "__main__":

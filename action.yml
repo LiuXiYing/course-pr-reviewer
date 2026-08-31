@@ -21,7 +21,10 @@ inputs:
     description: Ephemeral GITHUB_TOKEN supplied by the caller
     required: true
   glm-api-key:
-    description: GLM API key; required when ai_review or vision_review is enabled
+    description: GLM API key; required when a review provider is glm
+    required: false
+  gemini-api-key:
+    description: Gemini API key; required when a review provider is gemini
     required: false
 
 outputs:
@@ -66,6 +69,7 @@ runs:
         PR_INFO_DIR: ${{ inputs.metadata-dir }}
         GH_TOKEN: ${{ inputs.github-token }}
         GLM_API_KEY: ${{ inputs.glm-api-key }}
+        GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
       run: |
         set +e
         course-pr-reviewer review \

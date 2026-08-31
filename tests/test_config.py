@@ -31,6 +31,24 @@ class CourseConfigurationTests(unittest.TestCase):
         self.assertTrue(course.feature_enabled("auto_merge"))
         self.assertTrue(course.feature_enabled("comment_review"))
         self.assertTrue(course.feature_enabled("close_late_pr"))
+        self.assertEqual(course.ai["provider"], "glm")
+
+    def test_gemini_provider_is_supported(self):
+        data = yaml.safe_load(
+            (ROOT / "examples/course-review.yml").read_text(encoding="utf-8")
+        )
+        data["ai"].update(
+            provider="gemini", model="gemini-3.5-flash-lite"
+        )
+        data["vision"].update(
+            provider="gemini", model="gemini-3.5-flash-lite"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "course.yml"
+            path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            course = load_course_config(path)
+        self.assertEqual(course.ai["provider"], "gemini")
+        self.assertEqual(course.vision["provider"], "gemini")
 
     def test_expected_title_uses_roster_identity(self):
         course = load_course_config(ROOT / "examples/course-review.yml")

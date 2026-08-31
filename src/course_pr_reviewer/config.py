@@ -57,6 +57,7 @@ class CourseConfiguration:
     @property
     def ai(self) -> dict[str, Any]:
         defaults: dict[str, Any] = {
+            "provider": "glm",
             "model": "glm-4.7-flash",
             "min_confidence": 0.8,
             "timeout_seconds": 60,
@@ -82,6 +83,7 @@ class CourseConfiguration:
     @property
     def vision(self) -> dict[str, Any]:
         defaults: dict[str, Any] = {
+            "provider": "glm",
             "model": "glm-4.6v-flash",
             "min_confidence": 0.85,
             "fail_confidence": 0.9,

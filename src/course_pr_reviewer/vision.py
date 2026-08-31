@@ -1,8 +1,7 @@
-"""Safe image loading, local PaddleOCR, and GLM vision review."""
+"""Safe image loading, local PaddleOCR, and multimodal AI review."""
 
 from __future__ import annotations
 
-import base64
 import fnmatch
 import json
 import math
@@ -18,7 +17,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .ai import AIOutcome, GlmAIReviewer, GlmClient
+from .ai import AIClient, AIOutcome, GlmAIReviewer
 from .config import CourseConfiguration
 from .exceptions import (
     ContentLimitExceeded,
@@ -214,7 +213,7 @@ class PaddleOCREngine:
 class GlmVisionReviewer:
     def __init__(
         self,
-        client: GlmClient,
+        client: AIClient,
         github: GitHubClient,
         *,
         ocr_engine: PaddleOCREngine | None = None,
@@ -385,7 +384,7 @@ class GlmVisionReviewer:
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": base64.b64encode(image.data).decode("ascii")
+                            "url": self.client.image_url(image.data)
                         },
                     },
                 ]
@@ -412,7 +411,7 @@ class GlmVisionReviewer:
                 ".".join(str(part) for part in errors[0].absolute_path) or "<root>"
             )
             raise ReviewSystemError(
-                f"GLM 图片输出未通过 Schema 验证：{location}: {errors[0].message}"
+                f"AI 图片输出未通过 Schema 验证：{location}: {errors[0].message}"
             )
         metadata.update(
             {
@@ -440,11 +439,11 @@ class GlmVisionReviewer:
         ):
             return AIOutcome(
                 decision=Decision.MANUAL_REVIEW,
-                summary="GLM 图片失败结论中仍包含不确定项，已阻止自动判定。",
+                summary="AI 图片失败结论中仍包含不确定项，已阻止自动判定。",
                 issues=(
                     Issue(
                         code=ReasonCode.VISION_UNCERTAIN,
-                        message="GLM 图片审核同时返回 FAIL 和 UNCERTAIN，需要重新审核",
+                        message="AI 图片审核同时返回 FAIL 和 UNCERTAIN，需要重新审核",
                     ),
                 ),
                 confidence=confidence,
@@ -455,11 +454,11 @@ class GlmVisionReviewer:
         ):
             return AIOutcome(
                 decision=Decision.MANUAL_REVIEW,
-                summary="GLM 图片人工复核结论与问题类型不一致，已保持安全拦截。",
+                summary="AI 图片人工复核结论与问题类型不一致，已保持安全拦截。",
                 issues=(
                     Issue(
                         code=ReasonCode.VISION_UNCERTAIN,
-                        message="GLM 图片 MANUAL_REVIEW 结果包含确定性问题，需要重新审核",
+                        message="AI 图片 MANUAL_REVIEW 结果包含确定性问题，需要重新审核",
                     ),
                 ),
                 confidence=confidence,
@@ -480,7 +479,7 @@ class GlmVisionReviewer:
         if unverifiable:
             return AIOutcome(
                 decision=Decision.MANUAL_REVIEW,
-                summary="GLM 返回的部分图片证据无法复核。",
+                summary="AI 返回的部分图片证据无法复核。",
                 issues=(
                     Issue(
                         code=ReasonCode.VISION_UNCERTAIN,
@@ -500,7 +499,7 @@ class GlmVisionReviewer:
         if confidence < threshold:
             return AIOutcome(
                 decision=Decision.MANUAL_REVIEW,
-                summary=(f"GLM 图片置信度 {confidence:.2f} 低于阈值 {threshold:.2f}。"),
+                summary=(f"AI 图片置信度 {confidence:.2f} 低于阈值 {threshold:.2f}。"),
                 issues=(
                     Issue(
                         code=ReasonCode.VISION_UNCERTAIN,
