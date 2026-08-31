@@ -172,6 +172,34 @@ class GlmVisionReviewerTests(unittest.TestCase):
         self.assertTrue(decoded.startswith(b"\x89PNG"))
         self.assertEqual(github.calls[0][1], SHA)
 
+    def test_vision_stage_uses_vision_review_points_when_configured(self):
+        data = copy.deepcopy(self.course.data)
+        data["assignments"]["Lab1"]["review_points"] = ["检查作业是否完成题目要求"]
+        data["assignments"]["Lab1"]["vision_review_points"] = [
+            "检查截图中的运行结果是否与答案一致"
+        ]
+        course = CourseConfiguration(data)
+        reviewer, transport, _ = self.reviewer(vision_result())
+        reviewer.review(course, "Lab1", self.snapshot, "2023010102刘西莹/Lab1")
+        payload = json.loads(
+            transport.calls[0]["messages"][1]["content"][0]["text"].split("\n", 1)[1]
+        )
+        self.assertEqual(
+            payload["review_points"], ["检查截图中的运行结果是否与答案一致"]
+        )
+
+    def test_vision_stage_falls_back_to_review_points(self):
+        data = copy.deepcopy(self.course.data)
+        data["assignments"]["Lab1"]["review_points"] = ["只有一份审核点"]
+        data["assignments"]["Lab1"].pop("vision_review_points", None)
+        course = CourseConfiguration(data)
+        reviewer, transport, _ = self.reviewer(vision_result())
+        reviewer.review(course, "Lab1", self.snapshot, "2023010102刘西莹/Lab1")
+        payload = json.loads(
+            transport.calls[0]["messages"][1]["content"][0]["text"].split("\n", 1)[1]
+        )
+        self.assertEqual(payload["review_points"], ["只有一份审核点"])
+
     def test_high_confidence_visual_failure_is_returned(self):
         issue = {
             "category": "VISUAL_VIOLATION",

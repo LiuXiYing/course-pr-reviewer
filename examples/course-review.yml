@@ -62,6 +62,7 @@ assignments:
       - result.*
     review_points:
       - 检查作业是否完成题目要求
+    vision_review_points:
       - 检查截图中的运行结果是否与答案一致
 
   Lab2:

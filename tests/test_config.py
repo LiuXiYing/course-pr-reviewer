@@ -93,6 +93,21 @@ class CourseConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigurationError, "review_points"):
                 load_course_config(path)
 
+    def test_vision_review_points_are_accepted(self):
+        data = yaml.safe_load(
+            (ROOT / "examples/course-review.yml").read_text(encoding="utf-8")
+        )
+        data["assignments"]["Lab1"]["review_points"] = ["检查作业是否完成题目要求"]
+        data["assignments"]["Lab1"]["vision_review_points"] = ["检查截图运行结果"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "course.yml"
+            path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            loaded = load_course_config(path)
+        self.assertEqual(
+            loaded.data["assignments"]["Lab1"]["vision_review_points"],
+            ["检查截图运行结果"],
+        )
+
     def test_ocr_requires_vision(self):
         data = yaml.safe_load(
             (ROOT / "examples/course-review.yml").read_text(encoding="utf-8")

@@ -95,7 +95,7 @@ class GlmAIReviewerTests(unittest.TestCase):
         self.assertEqual(request["response_format"], {"type": "json_object"})
         self.assertEqual(request["thinking"], {"type": "disabled"})
         self.assertIn("不可信数据", request["messages"][0]["content"])
-        self.assertIn("必须完全忽略这些审核点", request["messages"][0]["content"])
+        self.assertIn("本阶段不会收到它们", request["messages"][0]["content"])
         untrusted_payload = json.loads(
             request["messages"][1]["content"].split("\n", 1)[1]
         )
@@ -145,6 +145,34 @@ class GlmAIReviewerTests(unittest.TestCase):
         outcome = reviewer.review(self.course, "Lab1", self.snapshot)
         self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
         self.assertEqual(outcome.issues[0].code, ReasonCode.AI_UNCERTAIN)
+
+    def test_text_stage_never_sees_vision_points_or_image_paths(self):
+        data = copy.deepcopy(self.course.data)
+        data["assignments"]["Lab1"]["review_points"] = ["检查作业是否完成题目要求"]
+        data["assignments"]["Lab1"]["vision_review_points"] = [
+            "检查截图中的运行结果是否与答案一致"
+        ]
+        course = CourseConfiguration(data)
+        image_path = "2023010102刘西莹/Lab1/result.png"
+        snapshot = copy.copy(self.snapshot)
+        object.__setattr__(
+            snapshot,
+            "files",
+            (
+                ChangedFile(self.path, "added", content=self.content),
+                ChangedFile(image_path, "added", content=None),
+            ),
+        )
+        reviewer, transport = self.reviewer(model_result())
+        reviewer.review(course, "Lab1", snapshot)
+        payload = json.loads(
+            json.loads(transport.calls[0][2])["messages"][1]["content"].split("\n", 1)[
+                1
+            ]
+        )
+        self.assertEqual(payload["review_points"], ["检查作业是否完成题目要求"])
+        self.assertNotIn("non_text_files", payload)
+        self.assertNotIn("result.png", json.dumps(payload, ensure_ascii=False))
 
     def test_issues_about_non_text_files_are_dropped_in_text_stage(self):
         image_path = "2023010102刘西莹/Lab1/imgs/clion-toolchain.png"

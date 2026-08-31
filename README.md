@@ -112,6 +112,8 @@ ai:
 
 每个启用 AI 审核的作业必须在 `review_points` 中配置明确的审核点。AI 返回的 `FAIL` 证据必须能在对应学生文件中逐字查到，否则自动降级为 `MANUAL_REVIEW`。低于 `min_confidence` 的结果也会阻止自动通过。
 
+需要看图才能判断的审核点应放进 `vision_review_points`。纯文本阶段只会收到 `review_points`，不会收到图片审核点，也不会收到图片文件名；视觉阶段优先使用 `vision_review_points`，未配置时回退到 `review_points`。把两类审核点混在一起会让文本阶段看到自己无法验证的条件，从而产生无法复核的 `AI_UNCERTAIN`。
+
 启用后，学生提交中的文本/代码内容会发送至所选 API。请按学校数据规则评估是否允许，不要把教师密钥或无关仓库内容加入审核数据。
 
 ## 可选 PaddleOCR 与 AI 图片审核

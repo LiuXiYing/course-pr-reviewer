@@ -358,7 +358,8 @@ class GlmVisionReviewer:
                     {
                         "course": course.name,
                         "assignment_id": assignment_id,
-                        "review_points": assignment.get("review_points", []),
+                        "review_points": assignment.get("vision_review_points")
+                        or assignment.get("review_points", []),
                         "images": [
                             {
                                 "file": image.path,

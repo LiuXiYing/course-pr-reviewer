@@ -170,6 +170,10 @@
           "type": "array",
           "items": {"type": "string", "minLength": 1, "maxLength": 1000}
         },
+        "vision_review_points": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 1000}
+        },
         "min_nonempty_lines": {"type": "integer", "minimum": 0, "maximum": 10000},
         "allow_extra_files": {"type": "boolean"},
         "ai_review": {"type": "boolean"},
