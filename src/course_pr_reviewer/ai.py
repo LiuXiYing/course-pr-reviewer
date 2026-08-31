@@ -61,7 +61,21 @@ class AIOutcome:
 
 
 class _TransientGlmError(Exception):
-    pass
+    def __init__(
+        self, message: str, *, retry_after_seconds: float | None = None
+    ) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        return None
+    return min(seconds, 120.0) if seconds >= 0 else None
 
 
 def _response_schema() -> dict[str, Any]:
@@ -81,7 +95,12 @@ def _default_transport(
             payload = json.loads(raw_response.decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 429 or 500 <= exc.code < 600:
-            raise _TransientGlmError(f"GLM API 暂时错误（HTTP {exc.code}）") from exc
+            raise _TransientGlmError(
+                f"GLM API 暂时错误（HTTP {exc.code}）",
+                retry_after_seconds=_retry_after_seconds(
+                    exc.headers.get("Retry-After") if exc.headers else None
+                ),
+            ) from exc
         raise ReviewSystemError(f"GLM API 请求失败（HTTP {exc.code}）") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise _TransientGlmError("GLM API 连接或超时错误") from exc
@@ -142,9 +161,14 @@ class GlmClient:
             except _TransientGlmError as exc:
                 if attempt == max_attempts:
                     raise ReviewSystemError(
-                        f"GLM API 在 {max_attempts} 次尝试后仍不可用"
+                        f"GLM API 在 {max_attempts} 次尝试后仍不可用：{exc}"
                     ) from exc
-                self._sleeper(float(2 ** (attempt - 1)))
+                delay = (
+                    exc.retry_after_seconds
+                    if exc.retry_after_seconds is not None
+                    else float(min(5 * (2 ** (attempt - 1)), 60))
+                )
+                self._sleeper(delay)
         raise AssertionError("unreachable")
 
 
@@ -322,11 +346,33 @@ class GlmAIReviewer:
         if model_decision is Decision.FAIL and any(
             item["category"] == "UNCERTAIN" for item in raw_issues
         ):
-            raise ReviewSystemError("GLM FAIL 结果不能包含 UNCERTAIN 问题")
+            return AIOutcome(
+                decision=Decision.MANUAL_REVIEW,
+                summary="GLM 返回的失败结论中仍包含不确定项，已阻止自动判定。",
+                issues=(
+                    Issue(
+                        code=ReasonCode.AI_UNCERTAIN,
+                        message="GLM 同时返回 FAIL 和 UNCERTAIN，需要重新审核",
+                    ),
+                ),
+                confidence=confidence,
+                metadata=metadata,
+            )
         if model_decision is Decision.MANUAL_REVIEW and any(
             item["category"] != "UNCERTAIN" for item in raw_issues
         ):
-            raise ReviewSystemError("GLM MANUAL_REVIEW 结果只能包含 UNCERTAIN 问题")
+            return AIOutcome(
+                decision=Decision.MANUAL_REVIEW,
+                summary="GLM 返回的人工复核结论与问题类型不一致，已保持安全拦截。",
+                issues=(
+                    Issue(
+                        code=ReasonCode.AI_UNCERTAIN,
+                        message="GLM 的 MANUAL_REVIEW 结果包含确定性问题，需要重新审核",
+                    ),
+                ),
+                confidence=confidence,
+                metadata=metadata,
+            )
 
         unsupported_evidence: list[str] = []
         for item in raw_issues:

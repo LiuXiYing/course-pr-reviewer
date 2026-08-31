@@ -438,12 +438,32 @@ class GlmVisionReviewer:
         if decision is Decision.FAIL and any(
             item["category"] == "UNCERTAIN" for item in raw_issues
         ):
-            raise ReviewSystemError("GLM 图片 FAIL 结果不能包含 UNCERTAIN 问题")
+            return AIOutcome(
+                decision=Decision.MANUAL_REVIEW,
+                summary="GLM 图片失败结论中仍包含不确定项，已阻止自动判定。",
+                issues=(
+                    Issue(
+                        code=ReasonCode.VISION_UNCERTAIN,
+                        message="GLM 图片审核同时返回 FAIL 和 UNCERTAIN，需要重新审核",
+                    ),
+                ),
+                confidence=confidence,
+                metadata=metadata,
+            )
         if decision is Decision.MANUAL_REVIEW and any(
             item["category"] != "UNCERTAIN" for item in raw_issues
         ):
-            raise ReviewSystemError(
-                "GLM 图片 MANUAL_REVIEW 结果只能包含 UNCERTAIN 问题"
+            return AIOutcome(
+                decision=Decision.MANUAL_REVIEW,
+                summary="GLM 图片人工复核结论与问题类型不一致，已保持安全拦截。",
+                issues=(
+                    Issue(
+                        code=ReasonCode.VISION_UNCERTAIN,
+                        message="GLM 图片 MANUAL_REVIEW 结果包含确定性问题，需要重新审核",
+                    ),
+                ),
+                confidence=confidence,
+                metadata=metadata,
             )
 
         image_paths = {image.path for image in images}

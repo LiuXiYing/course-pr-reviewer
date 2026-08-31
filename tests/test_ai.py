@@ -156,6 +156,34 @@ class GlmAIReviewerTests(unittest.TestCase):
         outcome = reviewer.review(self.course, "Lab1", self.snapshot)
         self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
 
+    def test_fail_with_uncertain_issue_is_downgraded_to_manual(self):
+        issue = {
+            "category": "UNCERTAIN",
+            "message": "无法确认运行结果",
+            "file": self.path,
+            "evidence": "遍历结果：A B C",
+            "rule": "检查遍历结果",
+        }
+        reviewer, _ = self.reviewer(model_result("FAIL", issues=[issue]))
+        outcome = reviewer.review(self.course, "Lab1", self.snapshot)
+        self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
+        self.assertEqual(outcome.issues[0].code, ReasonCode.AI_UNCERTAIN)
+
+    def test_manual_with_definite_issue_remains_safe_manual(self):
+        issue = {
+            "category": "CONTENT_VIOLATION",
+            "message": "遍历结果不正确",
+            "file": self.path,
+            "evidence": "遍历结果：A B C",
+            "rule": "检查遍历结果",
+        }
+        reviewer, _ = self.reviewer(
+            model_result("MANUAL_REVIEW", issues=[issue])
+        )
+        outcome = reviewer.review(self.course, "Lab1", self.snapshot)
+        self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
+        self.assertEqual(outcome.issues[0].code, ReasonCode.AI_UNCERTAIN)
+
     def test_schema_violation_fails_closed(self):
         reviewer, _ = self.reviewer({"decision": "PASS"})
         with self.assertRaisesRegex(ReviewSystemError, "Schema"):
@@ -197,6 +225,41 @@ class GlmClientTests(unittest.TestCase):
     def test_missing_key_is_rejected(self):
         with self.assertRaisesRegex(ReviewSystemError, "GLM_API_KEY"):
             GlmClient("")
+
+    def test_transient_backoff_uses_longer_exponential_delays(self):
+        calls = 0
+        delays = []
+
+        def transport(url, headers, body, timeout):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise _TransientGlmError("GLM API 暂时错误（HTTP 429）")
+            return {"choices": [{"message": {"content": "{}"}}]}
+
+        client = GlmClient("test-key", transport=transport, sleeper=delays.append)
+        client.complete(
+            model="glm-4.7-flash",
+            messages=[{"role": "user", "content": "test"}],
+            timeout_seconds=10,
+            max_attempts=3,
+            max_output_tokens=100,
+        )
+        self.assertEqual(delays, [5.0, 10.0])
+
+    def test_final_transient_error_preserves_safe_status_detail(self):
+        def transport(url, headers, body, timeout):
+            raise _TransientGlmError("GLM API 暂时错误（HTTP 429）")
+
+        client = GlmClient("test-key", transport=transport, sleeper=lambda _: None)
+        with self.assertRaisesRegex(ReviewSystemError, "HTTP 429"):
+            client.complete(
+                model="glm-4.7-flash",
+                messages=[{"role": "user", "content": "test"}],
+                timeout_seconds=10,
+                max_attempts=3,
+                max_output_tokens=100,
+            )
 
 
 if __name__ == "__main__":

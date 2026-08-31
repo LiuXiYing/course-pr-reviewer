@@ -214,6 +214,21 @@ class GlmVisionReviewerTests(unittest.TestCase):
         )
         self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
 
+    def test_fail_with_uncertain_issue_is_downgraded_to_manual(self):
+        issue = {
+            "category": "UNCERTAIN",
+            "message": "无法确认截图内容",
+            "file": "result.png",
+            "evidence": "截图内容不清晰",
+            "rule": "检查运行输出",
+        }
+        reviewer, _, _ = self.reviewer(vision_result("FAIL", issues=[issue]))
+        outcome = reviewer.review(
+            self.course, "Lab1", self.snapshot, "2023010102刘西莹/Lab1"
+        )
+        self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
+        self.assertEqual(outcome.issues[0].code, ReasonCode.VISION_UNCERTAIN)
+
     def test_configured_image_pattern_without_match_is_manual(self):
         snapshot = copy.copy(self.snapshot)
         object.__setattr__(
