@@ -95,6 +95,20 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(github.put_calls[0][1]["merge_method"], "merge")
         self.assertIn(COMMENT_MARKER, github.post_calls[0][1]["body"])
 
+    def test_merge_uses_dedicated_client_when_provided(self):
+        github = FakeGitHub()
+        merger = FakeGitHub()
+        outcome = GitHubResultPublisher(github, merge_github=merger).publish(
+            self.course,
+            result_dict(),
+            expected_repository="teacher/course",
+        )
+        self.assertTrue(outcome.merged)
+        self.assertEqual(github.put_calls, [])
+        self.assertEqual(merger.put_calls[0][1]["sha"], SHA)
+        self.assertIn(COMMENT_MARKER, github.post_calls[0][1]["body"])
+        self.assertEqual(merger.post_calls, [])
+
     def test_fail_updates_existing_bot_comment_without_merging(self):
         issue = Issue(code=ReasonCode.TITLE_MISMATCH, message="标题错误")
         comments = [

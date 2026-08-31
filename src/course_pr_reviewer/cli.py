@@ -196,8 +196,19 @@ def main(argv: list[str] | None = None) -> int:
                 token,
                 api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
             )
+            merge_token = os.environ.get("MERGE_TOKEN", "")
+            merge_github = (
+                GitHubClient(
+                    merge_token,
+                    api_url=os.environ.get(
+                        "GITHUB_API_URL", "https://api.github.com"
+                    ),
+                )
+                if merge_token
+                else None
+            )
             result = load_result(args.result_file)
-            outcome = GitHubResultPublisher(github).publish(
+            outcome = GitHubResultPublisher(github, merge_github=merge_github).publish(
                 course, result, expected_repository=expected_repository
             )
             print(json.dumps(outcome.__dict__, ensure_ascii=False, sort_keys=True))

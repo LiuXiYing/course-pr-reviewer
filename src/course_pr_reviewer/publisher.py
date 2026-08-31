@@ -111,8 +111,13 @@ def render_comment(result: dict[str, Any]) -> str:
 
 
 class GitHubResultPublisher:
-    def __init__(self, github: GitHubClient) -> None:
+    def __init__(
+        self, github: GitHubClient, *, merge_github: GitHubClient | None = None
+    ) -> None:
         self.github = github
+        # GITHUB_TOKEN 无法合并 PR（403 Resource not accessible by integration），
+        # 合并需要单独的 PAT；未提供时回退到主 client。
+        self.merge_github = merge_github if merge_github is not None else github
 
     @staticmethod
     def _coordinates(
@@ -226,7 +231,7 @@ class GitHubResultPublisher:
                 return PublicationOutcome(commented=commented, skipped="head_changed")
             if latest.get("state") != "open":
                 return PublicationOutcome(commented=commented, skipped="pr_not_open")
-            response = self.github.put_json(
+            response = self.merge_github.put_json(
                 f"/repos/{repo}/pulls/{number}/merge",
                 {
                     "sha": head_sha,

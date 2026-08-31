@@ -20,6 +20,12 @@ inputs:
   github-token:
     description: Ephemeral GITHUB_TOKEN supplied by the caller
     required: true
+  merge-token:
+    description: >-
+      PAT used only to merge approved pull requests. GITHUB_TOKEN cannot merge
+      (403 Resource not accessible by integration); without this input auto_merge
+      will fail. Falls back to github-token when unset.
+    required: false
   glm-api-key:
     description: GLM API key; required when a review provider is glm
     required: false
@@ -68,6 +74,7 @@ runs:
         COURSE_STUDENTS_CONFIG: ${{ inputs.students-path }}
         PR_INFO_DIR: ${{ inputs.metadata-dir }}
         GH_TOKEN: ${{ inputs.github-token }}
+        MERGE_TOKEN: ${{ inputs.merge-token }}
         GLM_API_KEY: ${{ inputs.glm-api-key }}
         GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
       run: |
