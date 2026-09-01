@@ -67,6 +67,32 @@ def _safe_markdown(value: Any) -> str:
     return re.sub(r"([\\`*_{}\[\]()<>#+.!|~-])", r"\\\1", text)
 
 
+def _inline_code(value: Any) -> str:
+    """Render untrusted text as Markdown inline code without visible escapes."""
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    text = text.replace("@", "@\u200b")
+    longest_run = max(
+        (len(match.group(0)) for match in re.finditer(r"`+", text)),
+        default=0,
+    )
+    fence = "`" * (longest_run + 1)
+    padding = " " if text.startswith(("`", " ")) or text.endswith(("`", " ")) else ""
+    return f"{fence}{padding}{text}{padding}{fence}"
+
+
+def _safe_markdown_with_code(value: Any) -> str:
+    """Escape prose while preserving simple backtick-delimited code spans."""
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    parts: list[str] = []
+    cursor = 0
+    for match in re.finditer(r"`([^`]+)`", text):
+        parts.append(_safe_markdown(text[cursor : match.start()]))
+        parts.append(_inline_code(match.group(1)))
+        cursor = match.end()
+    parts.append(_safe_markdown(text[cursor:]))
+    return "".join(parts)
+
+
 def render_comment(result: dict[str, Any]) -> str:
     decision = Decision(result["decision"])
     headings = {
@@ -79,7 +105,7 @@ def render_comment(result: dict[str, Any]) -> str:
         COMMENT_MARKER,
         f"## {headings[decision]}",
         "",
-        _safe_markdown(result["summary"]),
+        _safe_markdown_with_code(result["summary"]),
     ]
     metadata = result.get("metadata", {})
     consensus_rows = []
@@ -114,23 +140,27 @@ def render_comment(result: dict[str, Any]) -> str:
     if issues:
         lines.extend(["", "### 具体问题", ""])
         for item in issues:
-            code = _safe_markdown(item["code"])
-            message = _safe_markdown(item["message"])
+            code = _inline_code(item["code"])
+            message = _safe_markdown_with_code(item["message"])
             file = item.get("file")
-            label = f"`{code}`"
+            label = code
             if file:
-                label += f" · `{_safe_markdown(file)}`"
+                label += f" · {_inline_code(file)}"
             lines.append(f"- {label}：{message}")
             if item.get("rule"):
-                lines.append(f"  - 审核点：{_safe_markdown(item['rule'])}")
+                lines.append(
+                    f"  - 审核点：{_safe_markdown_with_code(item['rule'])}"
+                )
             if item.get("evidence"):
-                lines.append(f"  - 证据：{_safe_markdown(item['evidence'])}")
+                lines.append(
+                    f"  - 证据：{_safe_markdown_with_code(item['evidence'])}"
+                )
     head_sha = result.get("metadata", {}).get("head_sha", "")
     lines.extend(
         [
             "",
             "---",
-            f"审核提交：`{_safe_markdown(str(head_sha)[:12])}`。新提交会重新触发审核。",
+            f"审核提交：{_inline_code(str(head_sha)[:12])}。新提交会重新触发审核。",
         ]
     )
     body = "\n".join(lines)

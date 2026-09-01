@@ -246,6 +246,18 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("@\u200beveryone", body)
         self.assertIn("\\*\\*不要通过\\*\\*", body)
 
+    def test_comment_renders_codes_paths_and_message_code_without_visible_escapes(self):
+        issue = Issue(
+            code=ReasonCode.REQUIRED_FILE_MISSING,
+            message="缺少必交文件：`imgs/clion-toolchain.png`",
+            file="imgs/clion-toolchain.png",
+        )
+        body = render_comment(result_dict(Decision.FAIL, issues=(issue,)))
+        self.assertIn("`REQUIRED_FILE_MISSING`", body)
+        self.assertIn("`imgs/clion-toolchain.png`", body)
+        self.assertNotIn("REQUIRED\\_FILE\\_MISSING", body)
+        self.assertNotIn("clion\\-toolchain\\.png", body)
+
     def test_comment_shows_dual_model_and_degraded_status(self):
         body = render_comment(
             result_dict(
