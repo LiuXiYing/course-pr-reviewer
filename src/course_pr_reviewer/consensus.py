@@ -130,6 +130,9 @@ class _ConsensusReviewer:
                     for provider, outcome in outcomes.items()
                 },
                 "unavailable_providers": sorted(unavailable),
+                "provider_errors": {
+                    provider: unavailable[provider] for provider in sorted(unavailable)
+                },
                 "history": history,
                 "provider_metadata": {
                     provider: outcome.metadata
@@ -161,6 +164,10 @@ class _ConsensusReviewer:
                         for provider, outcome in outcomes.items()
                     },
                     "unavailable_providers": sorted(unavailable),
+                    "provider_errors": {
+                        provider: unavailable[provider]
+                        for provider in sorted(unavailable)
+                    },
                 }
             )
             if not outcomes:

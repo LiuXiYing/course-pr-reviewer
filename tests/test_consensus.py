@@ -134,6 +134,10 @@ class ConsensusTests(unittest.TestCase):
         consensus = result.metadata["consensus"]
         self.assertTrue(consensus["degraded"])
         self.assertEqual(consensus["unavailable_providers"], ["glm"])
+        self.assertEqual(consensus["provider_errors"], {"glm": "glm timeout"})
+        self.assertEqual(
+            consensus["history"][0]["provider_errors"], {"glm": "glm timeout"}
+        )
 
     def test_one_unavailable_can_still_reject(self):
         result = self.review(
