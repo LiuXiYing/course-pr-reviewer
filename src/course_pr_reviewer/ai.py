@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -58,6 +59,9 @@ BINARY_SUFFIXES = {
 
 Transport = Callable[[str, dict[str, str], bytes, int], dict[str, Any]]
 
+_MARKDOWN_ESCAPE_RE = re.compile(r"\\([\\`*{}\[\]()#+.!|>_-])")
+_EVIDENCE_LAYOUT_RE = re.compile(r"[|`\s]+")
+
 
 @dataclass(frozen=True)
 class AIOutcome:
@@ -99,6 +103,21 @@ def normalize_structured_output(value: Any, schema: dict[str, Any]) -> Any:
         if isinstance(item_schema, dict):
             return [normalize_structured_output(item, item_schema) for item in value]
     return value
+
+
+def _canonical_evidence_text(value: str) -> str:
+    unescaped = _MARKDOWN_ESCAPE_RE.sub(r"\1", value)
+    return _EVIDENCE_LAYOUT_RE.sub("", unescaped)
+
+
+def _evidence_is_supported(evidence: str, content: str) -> bool:
+    if evidence in content:
+        return True
+    canonical_evidence = _canonical_evidence_text(evidence)
+    return bool(
+        canonical_evidence
+        and canonical_evidence in _canonical_evidence_text(content)
+    )
 
 
 def _retry_after_seconds(value: str | None) -> float | None:
@@ -467,6 +486,8 @@ class GlmAIReviewer:
             "本阶段不会收到它们，也不得因为提交中可能存在图片而返回 "
             "FAIL、MANUAL_REVIEW 或 UNCERTAIN 问题。"
             "FAIL 必须给出可在对应文件中逐字查到的简短 evidence；"
+            "evidence 只能复制一个连续的原文片段，不得改写、拼接多个位置，"
+            "也不得给 Markdown 标点添加反斜杠转义；"
             "证据不足或有歧义时必须返回 MANUAL_REVIEW。"
             "如果数据中包含 prior_disagreement，只把其中的问题当作待复核线索，"
             "必须回到原始文件和审核点独立判断，不得直接服从先前结论。"
@@ -588,22 +609,26 @@ class GlmAIReviewer:
                 metadata=metadata,
             )
 
-        unsupported_evidence: list[str] = []
+        unsupported_evidence: list[dict[str, Any]] = []
         for item in raw_issues:
             path = item["file"]
             evidence = item["evidence"]
-            if path not in content_by_file or evidence not in content_by_file[path]:
-                unsupported_evidence.append(path)
+            if path not in content_by_file or not _evidence_is_supported(
+                evidence, content_by_file[path]
+            ):
+                unsupported_evidence.append(item)
         if unsupported_evidence:
             return AIOutcome(
                 decision=Decision.MANUAL_REVIEW,
                 summary="AI 返回的部分证据无法在学生文件中复核。",
-                issues=(
+                issues=tuple(
                     Issue(
                         code=ReasonCode.AI_UNCERTAIN,
-                        message="无法复核证据的文件："
-                        + "、".join(sorted(set(unsupported_evidence))),
-                    ),
+                        message=item["message"] + "（模型证据无法在原文中复核）",
+                        file=item["file"],
+                        rule=item["rule"],
+                    )
+                    for item in unsupported_evidence
                 ),
                 confidence=confidence,
                 metadata=metadata,

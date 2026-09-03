@@ -157,6 +157,53 @@ class GlmAIReviewerTests(unittest.TestCase):
         outcome = reviewer.review(self.course, "Lab1", self.snapshot)
         self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
         self.assertEqual(outcome.issues[0].code, ReasonCode.AI_UNCERTAIN)
+        self.assertEqual(outcome.issues[0].file, self.path)
+        self.assertIn("结果不正确", outcome.issues[0].message)
+        self.assertIn("无法在原文中复核", outcome.issues[0].message)
+
+    def test_markdown_table_evidence_allows_layout_only_differences(self):
+        content = "| 虚磁盘容量 |40GB|\n"
+        snapshot = copy.copy(self.snapshot)
+        object.__setattr__(
+            snapshot,
+            "files",
+            (ChangedFile(self.path, "added", content=content),),
+        )
+        issue = {
+            "category": "CONTENT_VIOLATION",
+            "message": "虚磁盘容量不符合要求",
+            "file": self.path,
+            "evidence": r"\| 虚磁盘容量 \| 40GB \|",
+            "rule": "检查虚磁盘容量",
+        }
+        reviewer, _ = self.reviewer(model_result("FAIL", issues=[issue]))
+
+        outcome = reviewer.review(self.course, "Lab1", snapshot)
+
+        self.assertEqual(outcome.decision, Decision.FAIL)
+        self.assertEqual(outcome.issues[0].code, ReasonCode.AI_REJECTED)
+
+    def test_evidence_normalization_keeps_distinct_hyphen_characters(self):
+        content = "open‑vm‑tools active\n"
+        snapshot = copy.copy(self.snapshot)
+        object.__setattr__(
+            snapshot,
+            "files",
+            (ChangedFile(self.path, "added", content=content),),
+        )
+        issue = {
+            "category": "CONTENT_VIOLATION",
+            "message": "服务名称不正确",
+            "file": self.path,
+            "evidence": "open-vm-tools active",
+            "rule": "检查服务状态",
+        }
+        reviewer, _ = self.reviewer(model_result("FAIL", issues=[issue]))
+
+        outcome = reviewer.review(self.course, "Lab1", snapshot)
+
+        self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
+        self.assertIn("服务名称不正确", outcome.issues[0].message)
 
     def test_text_stage_never_sees_vision_points_or_image_paths(self):
         data = copy.deepcopy(self.course.data)
