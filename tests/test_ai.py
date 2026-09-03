@@ -282,6 +282,37 @@ class GlmAIReviewerTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewSystemError, "Schema"):
             reviewer.review(self.course, "Lab1", self.snapshot)
 
+    def test_unused_model_fields_are_ignored_before_schema_validation(self):
+        issue = {
+            "category": "CONTENT_VIOLATION",
+            "message": "遍历结果不正确",
+            "file": self.path,
+            "evidence": "遍历结果：A B C",
+            "rule": "检查遍历结果",
+            "content": "模型额外返回的说明",
+        }
+        result = model_result("FAIL", issues=[issue])
+        result["debug"] = "模型额外返回的根字段"
+        reviewer, _ = self.reviewer(result)
+
+        outcome = reviewer.review(self.course, "Lab1", self.snapshot)
+
+        self.assertEqual(outcome.decision, Decision.FAIL)
+        self.assertEqual(outcome.issues[0].message, "遍历结果不正确")
+
+    def test_unknown_fields_do_not_hide_missing_required_issue_fields(self):
+        issue = {
+            "category": "CONTENT_VIOLATION",
+            "message": "遍历结果不正确",
+            "file": self.path,
+            "rule": "检查遍历结果",
+            "content": "不能拿它补 evidence",
+        }
+        reviewer, _ = self.reviewer(model_result("FAIL", issues=[issue]))
+
+        with self.assertRaisesRegex(ReviewSystemError, "Schema"):
+            reviewer.review(self.course, "Lab1", self.snapshot)
+
     def test_transient_api_error_is_retried(self):
         reviewer, transport = self.reviewer(model_result(), transient_failures=2)
         outcome = reviewer.review(self.course, "Lab1", self.snapshot)

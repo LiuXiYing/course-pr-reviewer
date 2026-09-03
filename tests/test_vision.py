@@ -235,6 +235,26 @@ class GlmVisionReviewerTests(unittest.TestCase):
         self.assertEqual(outcome.decision, Decision.FAIL)
         self.assertEqual(outcome.issues[0].code, ReasonCode.VISION_REJECTED)
 
+    def test_unused_vision_model_fields_are_ignored(self):
+        issue = {
+            "category": "VISUAL_VIOLATION",
+            "message": "截图为手机拍摄",
+            "file": "result.png",
+            "evidence": "图片中有手机相机水印",
+            "rule": "必须使用虚拟机截图",
+            "content": "模型额外返回的说明",
+        }
+        result = vision_result("FAIL", issues=[issue])
+        result["debug"] = "模型额外返回的根字段"
+        reviewer, _, _ = self.reviewer(result)
+
+        outcome = reviewer.review(
+            self.course, "Lab1", self.snapshot, "2023010102刘西莹/Lab1"
+        )
+
+        self.assertEqual(outcome.decision, Decision.FAIL)
+        self.assertEqual(outcome.issues[0].code, ReasonCode.VISION_REJECTED)
+
     def test_ocr_failure_requires_exact_ocr_evidence(self):
         issue = {
             "category": "OCR_TEXT_VIOLATION",

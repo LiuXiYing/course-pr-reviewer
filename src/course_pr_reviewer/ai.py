@@ -76,6 +76,31 @@ class _TransientAIError(Exception):
         self.retry_after_seconds = retry_after_seconds
 
 
+def normalize_structured_output(value: Any, schema: dict[str, Any]) -> Any:
+    """Drop only fields that a closed JSON Schema does not define.
+
+    Model providers occasionally add explanatory fields even when instructed to
+    emit strict JSON.  Removing those unused fields keeps a usable response while
+    leaving missing fields, invalid types, and invalid values for schema validation
+    to reject.
+    """
+    if isinstance(value, dict):
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return value
+        allowed = properties if schema.get("additionalProperties") is False else value
+        return {
+            key: normalize_structured_output(item, properties.get(key, {}))
+            for key, item in value.items()
+            if key in allowed
+        }
+    if isinstance(value, list):
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            return [normalize_structured_output(item, item_schema) for item in value]
+    return value
+
+
 def _retry_after_seconds(value: str | None) -> float | None:
     if value is None:
         return None
@@ -463,6 +488,7 @@ class GlmAIReviewer:
             max_output_tokens=settings["max_output_tokens"],
         )
         parsed, response_metadata = self._parse_api_response(response)
+        parsed = normalize_structured_output(parsed, self.schema)
         validation_errors = sorted(
             Draft202012Validator(self.schema).iter_errors(parsed),
             key=lambda error: list(error.absolute_path),

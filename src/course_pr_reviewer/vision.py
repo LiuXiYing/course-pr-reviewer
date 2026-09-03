@@ -17,7 +17,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .ai import AIClient, AIOutcome, GlmAIReviewer
+from .ai import AIClient, AIOutcome, GlmAIReviewer, normalize_structured_output
 from .config import CourseConfiguration
 from .exceptions import (
     ContentLimitExceeded,
@@ -416,6 +416,7 @@ class GlmVisionReviewer:
             json_mode=False,
         )
         parsed, metadata = GlmAIReviewer._parse_api_response(response)
+        parsed = normalize_structured_output(parsed, self.schema)
         errors = sorted(
             Draft202012Validator(self.schema).iter_errors(parsed),
             key=lambda error: list(error.absolute_path),
