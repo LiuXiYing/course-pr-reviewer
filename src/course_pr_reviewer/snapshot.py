@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import datetime as dt
 import json
 import re
@@ -201,6 +199,48 @@ class GitHubClient:
     def put_json(self, path: str, body: dict[str, Any]) -> Any:
         return self.request_json("PUT", path, body=body, expected=(200, 201))
 
+    def get_bytes(
+        self,
+        path: str,
+        *,
+        max_bytes: int,
+        accept: str = "application/octet-stream",
+    ) -> bytes:
+        request = urllib.request.Request(
+            f"{self.api_url}{path}",
+            method="GET",
+            headers={
+                "Accept": accept,
+                "Authorization": f"Bearer {self.token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "course-pr-reviewer",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                if response.status != 200:
+                    raise ReviewSystemError(
+                        f"GitHub API GET {path} 返回 HTTP {response.status}"
+                    )
+                raw = response.read(max_bytes + 1)
+                if len(raw) > max_bytes:
+                    raise ContentLimitExceeded(
+                        f"文件大小超过 AI 审核上限 {max_bytes} 字节"
+                    )
+                return raw
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read(501).decode("utf-8", errors="replace")
+            except OSError:
+                detail = ""
+            detail = detail.replace("\n", " ")[:500]
+            suffix = f"：{detail}" if detail else ""
+            raise ReviewSystemError(
+                f"GitHub API GET {path} 返回 HTTP {exc.code}{suffix}"
+            ) from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise ReviewSystemError(f"GitHub API 请求失败：{exc}") from exc
+
     def pull_request(self, repository: str, number: int) -> dict[str, Any]:
         repo = urllib.parse.quote(repository, safe="/")
         result = self.get_json(f"/repos/{repo}/pulls/{number}")
@@ -228,27 +268,11 @@ class GitHubClient:
         if not SHA_RE.fullmatch(sha):
             raise ReviewSystemError("GitHub blob SHA 无效")
         repo = urllib.parse.quote(repository, safe="/")
-        result = self.get_json(f"/repos/{repo}/git/blobs/{sha}")
-        if not isinstance(result, dict):
-            raise ReviewSystemError("GitHub API 返回了无效的 blob 数据")
-        size = result.get("size")
-        encoded = result.get("content")
-        encoding = result.get("encoding")
-        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
-            raise ReviewSystemError("GitHub blob 缺少有效大小")
-        if size > max_bytes:
-            raise ContentLimitExceeded(
-                f"文件大小 {size} 字节，超过 AI 审核上限 {max_bytes} 字节"
-            )
-        if encoding != "base64" or not isinstance(encoded, str):
-            raise ReviewSystemError("GitHub blob 不是可支持的 base64 内容")
-        try:
-            raw = base64.b64decode("".join(encoded.split()), validate=True)
-        except (ValueError, binascii.Error) as exc:
-            raise ReviewSystemError("GitHub blob base64 内容无效") from exc
-        if len(raw) != size:
-            raise ReviewSystemError("GitHub blob 解码后大小不一致")
-        return raw
+        return self.get_bytes(
+            f"/repos/{repo}/git/blobs/{sha}",
+            max_bytes=max_bytes,
+            accept="application/vnd.github.raw+json",
+        )
 
     def text_blob(self, repository: str, sha: str, *, max_bytes: int) -> str | None:
         raw = self.blob_bytes(repository, sha, max_bytes=max_bytes)

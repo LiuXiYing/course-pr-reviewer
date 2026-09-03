@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import datetime as dt
 import json
 import tempfile
@@ -8,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from course_pr_reviewer.exceptions import ReviewSystemError
+from course_pr_reviewer.exceptions import ContentLimitExceeded, ReviewSystemError
 from course_pr_reviewer.snapshot import GitHubClient, load_snapshot, snapshot_from_dict
 
 
@@ -51,11 +50,7 @@ class SnapshotTests(unittest.TestCase):
     def test_github_blob_is_decoded_as_utf8_text(self):
         client = GitHubClient("token")
         raw = "作业内容\n".encode()
-        client.get_json = lambda _: {
-            "size": len(raw),
-            "encoding": "base64",
-            "content": base64.b64encode(raw).decode(),
-        }
+        client.get_bytes = lambda *args, **kwargs: raw
         self.assertEqual(
             client.text_blob("teacher/course", "a" * 40, max_bytes=1000),
             "作业内容\n",
@@ -64,23 +59,43 @@ class SnapshotTests(unittest.TestCase):
     def test_github_blob_bytes_returns_exact_binary(self):
         client = GitHubClient("token")
         raw = b"\x89PNG\r\n\x1a\n"
-        client.get_json = lambda _: {
-            "size": len(raw),
-            "encoding": "base64",
-            "content": base64.b64encode(raw).decode(),
-        }
+        calls = []
+
+        def get_bytes(path, *, max_bytes, accept):
+            calls.append((path, max_bytes, accept))
+            return raw
+
+        client.get_bytes = get_bytes
         self.assertEqual(
             client.blob_bytes("teacher/course", "a" * 40, max_bytes=1000), raw
         )
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "/repos/teacher/course/git/blobs/" + "a" * 40,
+                    1000,
+                    "application/vnd.github.raw+json",
+                )
+            ],
+        )
+
+    @patch("course_pr_reviewer.snapshot.urllib.request.urlopen")
+    def test_raw_response_larger_than_limit_is_rejected(self, urlopen):
+        response = urlopen.return_value.__enter__.return_value
+        response.status = 200
+        response.read.return_value = b"x" * 1001
+
+        client = GitHubClient("token")
+        with self.assertRaisesRegex(ContentLimitExceeded, "1000"):
+            client.get_bytes("/blob", max_bytes=1000)
+
+        response.read.assert_called_once_with(1001)
 
     def test_binary_blob_is_skipped(self):
         client = GitHubClient("token")
         raw = b"image\0data"
-        client.get_json = lambda _: {
-            "size": len(raw),
-            "encoding": "base64",
-            "content": base64.b64encode(raw).decode(),
-        }
+        client.get_bytes = lambda *args, **kwargs: raw
         self.assertIsNone(client.text_blob("teacher/course", "a" * 40, max_bytes=1000))
 
     @patch("course_pr_reviewer.snapshot.GitHubClient.changed_files")
