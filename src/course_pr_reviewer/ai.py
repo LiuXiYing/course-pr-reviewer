@@ -23,6 +23,7 @@ from .exceptions import (
     ReviewSystemError,
 )
 from .models import Decision, Issue, ReasonCode
+from .path_utils import resolve_filename
 from .snapshot import GitHubClient, PullRequestSnapshot
 
 GLM_ENDPOINT = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
@@ -571,7 +572,14 @@ class GlmAIReviewer:
         raw_issues = parsed["issues"]
         # 纯文本阶段拿不到图片内容，模型仍可能对 non_text_files 报问题。
         # 这类问题无法在此阶段复核，交由视觉阶段判定，这里直接丢弃。
-        raw_issues = [item for item in raw_issues if item["file"] in content_by_file]
+        resolved_issues: list[dict[str, Any]] = []
+        for item in raw_issues:
+            resolved_path = resolve_filename(item["file"], content_by_file.keys())
+            if resolved_path is not None:
+                resolved_item = dict(item)
+                resolved_item["file"] = resolved_path
+                resolved_issues.append(resolved_item)
+        raw_issues = resolved_issues
         if not raw_issues and model_decision is not Decision.PASS:
             model_decision = Decision.PASS
         if model_decision is Decision.FAIL:

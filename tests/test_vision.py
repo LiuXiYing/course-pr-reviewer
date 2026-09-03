@@ -255,6 +255,44 @@ class GlmVisionReviewerTests(unittest.TestCase):
         self.assertEqual(outcome.decision, Decision.FAIL)
         self.assertEqual(outcome.issues[0].code, ReasonCode.VISION_REJECTED)
 
+    def test_filename_hyphens_match_patterns_and_model_paths(self):
+        data = copy.deepcopy(self.course.data)
+        data["assignments"]["Lab1"]["vision_files"] = [
+            "imgs/lab1-vmware-version.png"
+        ]
+        course = CourseConfiguration(data)
+        actual_relative = "imgs/lab1‑vmware‑version.png"
+        actual_full = f"2023010102刘西莹/Lab1/{actual_relative}"
+        snapshot = copy.copy(self.snapshot)
+        object.__setattr__(
+            snapshot,
+            "files",
+            (ChangedFile(actual_full, "added", blob_sha=SHA),),
+        )
+        issue = {
+            "category": "VISUAL_VIOLATION",
+            "message": "截图内容不符合要求",
+            "file": "imgs/lab1-vmware-version.png",
+            "evidence": "截图中缺少版本号",
+            "rule": "检查 VMware 版本",
+        }
+        reviewer, transport, _ = self.reviewer(
+            vision_result("FAIL", issues=[issue])
+        )
+
+        outcome = reviewer.review(
+            course, "Lab1", snapshot, "2023010102刘西莹/Lab1"
+        )
+
+        self.assertEqual(outcome.decision, Decision.FAIL)
+        self.assertEqual(outcome.issues[0].file, actual_relative)
+        payload = json.loads(
+            transport.calls[0]["messages"][1]["content"][0]["text"].split(
+                "\n", 1
+            )[1]
+        )
+        self.assertEqual(payload["images"][0]["file"], actual_relative)
+
     def test_ocr_failure_requires_exact_ocr_evidence(self):
         issue = {
             "category": "OCR_TEXT_VIOLATION",

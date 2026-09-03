@@ -205,6 +205,28 @@ class GlmAIReviewerTests(unittest.TestCase):
         self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
         self.assertIn("服务名称不正确", outcome.issues[0].message)
 
+    def test_model_filename_hyphens_resolve_to_the_submitted_text_path(self):
+        actual_path = "2023010102刘西莹/Lab1/lab1‑report.md"
+        snapshot = copy.copy(self.snapshot)
+        object.__setattr__(
+            snapshot,
+            "files",
+            (ChangedFile(actual_path, "added", content=self.content),),
+        )
+        issue = {
+            "category": "CONTENT_VIOLATION",
+            "message": "遍历结果不正确",
+            "file": "2023010102刘西莹/Lab1/lab1-report.md",
+            "evidence": "遍历结果：A B C",
+            "rule": "检查遍历结果",
+        }
+        reviewer, _ = self.reviewer(model_result("FAIL", issues=[issue]))
+
+        outcome = reviewer.review(self.course, "Lab1", snapshot)
+
+        self.assertEqual(outcome.decision, Decision.FAIL)
+        self.assertEqual(outcome.issues[0].file, actual_path)
+
     def test_text_stage_never_sees_vision_points_or_image_paths(self):
         data = copy.deepcopy(self.course.data)
         data["assignments"]["Lab1"]["review_points"] = ["检查作业是否完成题目要求"]

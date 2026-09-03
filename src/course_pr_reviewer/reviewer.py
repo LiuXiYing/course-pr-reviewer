@@ -5,13 +5,13 @@ from __future__ import annotations
 import datetime as dt
 import re
 import string
-from pathlib import PurePosixPath
 
 from . import __version__
 from .ai import GlmAIReviewer
 from .config import CourseConfiguration, Student, StudentRoster
 from .exceptions import InvalidStudentImage, ReviewSystemError
 from .models import Decision, Issue, ReasonCode, ReviewResult
+from .path_utils import canonical_filename
 from .snapshot import PullRequestSnapshot
 from .vision import GlmVisionReviewer
 
@@ -43,7 +43,7 @@ def _configured_assignment_for_path(
 ) -> str | None:
     for assignment_id in course.assignments:
         prefix = course.expected_submission_dir(student, assignment_id) + "/"
-        if filename.startswith(prefix):
+        if canonical_filename(filename).startswith(canonical_filename(prefix)):
             return assignment_id
     return None
 
@@ -51,19 +51,28 @@ def _configured_assignment_for_path(
 def _required_file_issues(assignment: dict, submitted: set[str]) -> list[Issue]:
     issues: list[Issue] = []
     allowed: set[str] = set()
+    canonical_submitted = {canonical_filename(path) for path in submitted}
     for requirement in assignment["required_files"]:
         alternatives = (
             [requirement] if isinstance(requirement, str) else requirement["one_of"]
         )
         allowed.update(alternatives)
-        if not submitted.intersection(alternatives):
+        canonical_alternatives = {
+            canonical_filename(path) for path in alternatives
+        }
+        if not canonical_submitted.intersection(canonical_alternatives):
             label = " 或 ".join(f"`{name}`" for name in alternatives)
             issues.append(
                 _issue(ReasonCode.REQUIRED_FILE_MISSING, f"缺少必交文件：{label}")
             )
 
     if not assignment.get("allow_extra_files", False):
-        for extra in sorted(submitted - allowed):
+        canonical_allowed = {canonical_filename(path) for path in allowed}
+        for extra in sorted(
+            path
+            for path in submitted
+            if canonical_filename(path) not in canonical_allowed
+        ):
             issues.append(
                 _issue(
                     ReasonCode.EXTRA_FILE,
@@ -208,6 +217,7 @@ def review_pull_request(
     assignment = _with_defaults(course, assignment)
     expected_dir = course.expected_submission_dir(student, assignment_id)
     expected_prefix = expected_dir + "/"
+    canonical_expected_prefix = canonical_filename(expected_prefix)
     assignment_order = list(course.assignments)
     current_index = assignment_order.index(assignment_id)
     submitted: set[str] = set()
@@ -225,7 +235,9 @@ def review_pull_request(
                 )
             )
 
-        if not changed.filename.startswith(expected_prefix):
+        if not canonical_filename(changed.filename).startswith(
+            canonical_expected_prefix
+        ):
             path_assignment = _configured_assignment_for_path(
                 course, student, changed.filename
             )
@@ -251,7 +263,7 @@ def review_pull_request(
             continue
 
         if changed.status != "removed":
-            relative = str(PurePosixPath(changed.filename).relative_to(expected_dir))
+            relative = changed.filename[len(expected_prefix) :]
             submitted.add(relative)
 
     issues.extend(_required_file_issues(assignment, submitted))

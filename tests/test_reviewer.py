@@ -12,6 +12,7 @@ from course_pr_reviewer.config import (
     load_student_roster,
 )
 from course_pr_reviewer.models import Decision, Issue, ReasonCode
+from course_pr_reviewer.path_utils import canonical_filename, resolve_filename
 from course_pr_reviewer.reviewer import review_pull_request
 from course_pr_reviewer.snapshot import ChangedFile, PullRequestSnapshot
 
@@ -141,6 +142,40 @@ class DeterministicReviewerTests(unittest.TestCase):
         )
         self.assertIn(ReasonCode.REQUIRED_FILE_MISSING, self.codes(result))
         self.assertIn(ReasonCode.EXTRA_FILE, self.codes(result))
+
+    def test_filename_hyphen_variants_match_ascii_requirements(self):
+        self.course.data["assignments"]["Lab1"]["required_files"] = [
+            "Lab1.md",
+            "imgs/lab1-vmware-version.png",
+        ]
+        files = (
+            ChangedFile("2023010102刘西莹/Lab1/Lab1.md", "added"),
+            ChangedFile(
+                "2023010102刘西莹/Lab1/imgs/lab1‑vmware‑version.png",
+                "added",
+            ),
+        )
+
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(files=files)
+        )
+
+        self.assertEqual(result.decision, Decision.PASS)
+
+    def test_filename_normalization_is_narrow_and_ambiguous_aliases_are_safe(self):
+        for variant in ("‐", "‑", "－"):
+            with self.subTest(variant=variant):
+                self.assertEqual(
+                    canonical_filename(f"lab1{variant}result.png"),
+                    "lab1-result.png",
+                )
+        self.assertNotEqual(canonical_filename("lab1–result.png"), "lab1-result.png")
+        self.assertIsNone(
+            resolve_filename(
+                "lab1‐result.png",
+                {"lab1-result.png", "lab1‑result.png"},
+            )
+        )
 
     def test_late_event_fails(self):
         result = review_pull_request(

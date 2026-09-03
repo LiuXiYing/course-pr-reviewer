@@ -25,6 +25,7 @@ from .exceptions import (
     ReviewSystemError,
 )
 from .models import Decision, Issue, ReasonCode
+from .path_utils import canonical_filename, resolve_filename
 from .snapshot import ChangedFile, GitHubClient, PullRequestSnapshot
 
 SUPPORTED_IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
@@ -236,12 +237,21 @@ class GlmVisionReviewer:
         if not patterns:
             return []
         prefix = submission_dir + "/"
+        canonical_prefix = canonical_filename(prefix)
         selected: list[tuple[ChangedFile, str]] = []
         for changed in snapshot.files:
-            if changed.status == "removed" or not changed.filename.startswith(prefix):
+            if changed.status == "removed" or not canonical_filename(
+                changed.filename
+            ).startswith(canonical_prefix):
                 continue
-            relative = str(PurePosixPath(changed.filename).relative_to(submission_dir))
-            if any(fnmatch.fnmatchcase(relative, pattern) for pattern in patterns):
+            relative = changed.filename[len(prefix) :]
+            canonical_relative = canonical_filename(relative)
+            if any(
+                fnmatch.fnmatchcase(
+                    canonical_relative, canonical_filename(pattern)
+                )
+                for pattern in patterns
+            ):
                 selected.append((changed, relative))
         return selected
 
@@ -484,13 +494,17 @@ class GlmVisionReviewer:
         unverifiable: list[str] = []
         for item in raw_issues:
             path = item["file"]
-            if path not in image_paths:
+            resolved_path = resolve_filename(path, image_paths)
+            if resolved_path is None:
                 unverifiable.append(path)
                 continue
+            item["file"] = resolved_path
             if item["category"] in {"OCR_TEXT_VIOLATION", "PROMPT_INJECTION"}:
-                ocr_text = ocr_results.get(path, OCRResult("", None, 0, 0)).text
+                ocr_text = ocr_results.get(
+                    resolved_path, OCRResult("", None, 0, 0)
+                ).text
                 if item["evidence"] not in ocr_text:
-                    unverifiable.append(path)
+                    unverifiable.append(resolved_path)
         if unverifiable:
             return AIOutcome(
                 decision=Decision.MANUAL_REVIEW,
