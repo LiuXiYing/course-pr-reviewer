@@ -109,7 +109,7 @@ class PublisherTests(unittest.TestCase):
         self.assertIn(COMMENT_MARKER, github.post_calls[0][1]["body"])
         self.assertEqual(merger.post_calls, [])
 
-    def test_fail_updates_existing_bot_comment_without_merging(self):
+    def test_fail_creates_new_comment_even_when_old_review_comment_exists(self):
         issue = Issue(code=ReasonCode.TITLE_MISMATCH, message="标题错误")
         comments = [
             {
@@ -127,8 +127,11 @@ class PublisherTests(unittest.TestCase):
         self.assertTrue(outcome.commented)
         self.assertFalse(outcome.merged)
         self.assertEqual(
-            github.patch_calls[0][0], "/repos/teacher/course/issues/comments/99"
+            github.post_calls[0][0], "/repos/teacher/course/issues/7/comments"
         )
+        self.assertIn("标题错误", github.post_calls[0][1]["body"])
+        self.assertEqual(github.get_calls, [])
+        self.assertEqual(github.patch_calls, [])
         self.assertEqual(github.put_calls, [])
 
     def test_late_result_comments_then_closes(self):

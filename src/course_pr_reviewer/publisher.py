@@ -205,35 +205,10 @@ class GitHubResultPublisher:
     def _is_same_head(pr: dict[str, Any], head_sha: str) -> bool:
         return str(pr.get("head", {}).get("sha", "")).lower() == head_sha
 
-    def _upsert_comment(self, repository: str, number: int, body: str) -> None:
+    def _create_comment(self, repository: str, number: int, body: str) -> None:
         repo = urllib.parse.quote(repository, safe="/")
-        existing: dict[str, Any] | None = None
-        for page in range(1, 11):
-            comments = self.github.get_json(
-                f"/repos/{repo}/issues/{number}/comments?per_page=100&page={page}"
-            )
-            if not isinstance(comments, list):
-                raise ReviewSystemError("GitHub API 返回了无效的 PR 评论列表")
-            for comment in reversed(comments):
-                if (
-                    isinstance(comment, dict)
-                    and COMMENT_MARKER in str(comment.get("body", ""))
-                    and comment.get("user", {}).get("login") == "github-actions[bot]"
-                ):
-                    existing = comment
-                    break
-            if existing is not None or len(comments) < 100:
-                break
-        if existing is None:
-            self.github.post_json(
-                f"/repos/{repo}/issues/{number}/comments", {"body": body}
-            )
-            return
-        comment_id = existing.get("id")
-        if not isinstance(comment_id, int) or isinstance(comment_id, bool):
-            raise ReviewSystemError("已有审核评论缺少有效 ID")
-        self.github.patch_json(
-            f"/repos/{repo}/issues/comments/{comment_id}", {"body": body}
+        self.github.post_json(
+            f"/repos/{repo}/issues/{number}/comments", {"body": body}
         )
 
     def publish(
@@ -267,7 +242,7 @@ class GitHubResultPublisher:
 
         commented = False
         if course.feature_enabled("comment_review"):
-            self._upsert_comment(repository, number, render_comment(result))
+            self._create_comment(repository, number, render_comment(result))
             commented = True
 
         repo = urllib.parse.quote(repository, safe="/")
