@@ -280,6 +280,27 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("GLM", body)
         self.assertIn("降级运行", body)
 
+    def test_comment_confirms_successful_teacher_email(self):
+        body = render_comment(
+            result_dict(
+                Decision.MANUAL_REVIEW,
+                issues=(Issue(code=ReasonCode.AI_UNCERTAIN, message="需要人工确认"),),
+                metadata={"teacher_email_notification": "sent"},
+            )
+        )
+        self.assertIn("已通过邮件发送给任课教师", body)
+
+    def test_comment_does_not_claim_email_when_sending_failed(self):
+        body = render_comment(
+            result_dict(
+                Decision.ERROR,
+                issues=(Issue(code=ReasonCode.SERVICE_ERROR, message="服务异常"),),
+                metadata={"teacher_email_notification": "failed"},
+            )
+        )
+        self.assertIn("邮件通知任课教师失败", body)
+        self.assertNotIn("已通过邮件发送给任课教师", body)
+
     def test_result_file_is_schema_validated(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "result.json"

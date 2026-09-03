@@ -208,7 +208,15 @@ gh secret set GEMINI_API_KEY
     merge-token: ${{ secrets.PAT_TOKEN }}
     glm-api-key: ${{ secrets.GLM_API_KEY }}
     gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+    teacher-email: teacher@example.com
+    smtp-username: sender@gmail.com
+    smtp-password: ${{ secrets.GMAIL_APP_PASSWORD }}
 ```
+
+`teacher-email` 配置后，审核结果为 `MANUAL_REVIEW` 或 `ERROR` 时会通过
+SMTP SSL 通知任课教师，并在 PR Conversation 中确认邮件已发送。`PASS`、
+`FAIL` 和正常自动合并不会发送邮件。使用 Gmail 时，应启用两步验证并将
+应用专用密码保存为仓库 Secret；不要把密码写入工作流或课程配置文件。
 
 安全调用分为两个工作流：
 

@@ -14,6 +14,7 @@ from .config import load_course_config, load_student_roster
 from .consensus import TextConsensusReviewer, VisionConsensusReviewer
 from .exceptions import ConfigurationError, ReviewerError
 from .models import Decision, Issue, ReasonCode, ReviewResult
+from .notifications import TeacherEmailNotifier, notification_required
 from .publisher import GitHubResultPublisher, load_result
 from .reviewer import review_pull_request
 from .roster_import import import_students_excel
@@ -42,6 +43,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     publish.add_argument("--config", required=True)
     publish.add_argument("--result-file", required=True)
+
+    notify = subparsers.add_parser(
+        "notify", help="email the teacher when a review requires human intervention"
+    )
+    notify.add_argument("--config", required=True)
+    notify.add_argument("--result-file", required=True)
 
     roster_import = subparsers.add_parser(
         "import-students", help="convert a three-column .xlsx roster to students.yml"
@@ -194,6 +201,75 @@ def _write_error_result(message: str, result_file: str, code: ReasonCode) -> Non
     print(result.to_json())
 
 
+def _notify(config_path: str, result_file: str) -> int:
+    course = load_course_config(config_path)
+    result = load_result(result_file)
+    if not notification_required(result):
+        print(json.dumps({"email": "skipped"}, ensure_ascii=False))
+        return 0
+
+    metadata = result.setdefault("metadata", {})
+    required_environment = {
+        "TEACHER_EMAIL": os.environ.get("TEACHER_EMAIL", ""),
+        "SMTP_USERNAME": os.environ.get("SMTP_USERNAME", ""),
+        "SMTP_PASSWORD": os.environ.get("SMTP_PASSWORD", ""),
+    }
+    missing = [name for name, value in required_environment.items() if not value]
+    if missing:
+        metadata["teacher_email_notification"] = "failed"
+        metadata["teacher_email_notification_error"] = (
+            "缺少邮件配置：" + "、".join(missing)
+        )
+        Path(result_file).write_text(
+            json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(metadata["teacher_email_notification_error"], file=sys.stderr)
+        return 2
+
+    try:
+        port = int(os.environ.get("SMTP_PORT", "465"))
+        notifier = TeacherEmailNotifier(
+            recipient=required_environment["TEACHER_EMAIL"],
+            username=required_environment["SMTP_USERNAME"],
+            password=required_environment["SMTP_PASSWORD"],
+            host=os.environ.get("SMTP_HOST", "smtp.gmail.com"),
+            port=port,
+        )
+        repository = os.environ.get("GITHUB_REPOSITORY", "")
+        server_url = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+        run_id = os.environ.get("GITHUB_RUN_ID", "")
+        run_url = (
+            f"{server_url}/{repository}/actions/runs/{run_id}"
+            if repository and run_id
+            else ""
+        )
+        notifier.send(
+            course_name=course.name,
+            result=result,
+            repository=repository,
+            run_url=run_url,
+        )
+    except (ValueError, ReviewSystemError) as exc:
+        metadata["teacher_email_notification"] = "failed"
+        metadata["teacher_email_notification_error"] = str(exc)
+        Path(result_file).write_text(
+            json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    metadata["teacher_email_notification"] = "sent"
+    metadata.pop("teacher_email_notification_error", None)
+    Path(result_file).write_text(
+        json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps({"email": "sent"}, ensure_ascii=False))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -217,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
                 groups.append("ocr")
             print(" ".join(groups))
             return 0
+        if args.command == "notify":
+            return _notify(args.config, args.result_file)
         if args.command == "publish":
             course = load_course_config(args.config)
             token = os.environ.get("GH_TOKEN", "")

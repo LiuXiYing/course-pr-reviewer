@@ -108,6 +108,11 @@ def render_comment(result: dict[str, Any]) -> str:
         _safe_markdown_with_code(result["summary"]),
     ]
     metadata = result.get("metadata", {})
+    notification_status = metadata.get("teacher_email_notification")
+    if notification_status == "sent":
+        lines.extend(["", "> 已通过邮件发送给任课教师。"])
+    elif notification_status == "failed":
+        lines.extend(["", "> ⚠️ 邮件通知任课教师失败，请仓库管理员立即处理。"])
     consensus_rows = []
     for key, label in (
         ("ai_consensus", "文本审核"),
