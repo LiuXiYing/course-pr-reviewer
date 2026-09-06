@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: pr-info-${{ github.event.pull_request.number }}
@@ -24,6 +25,36 @@ jobs:
           script: |
             const fs = require("fs");
             const pr = context.payload.pull_request;
+            const action = context.payload.action;
+
+            // event_at is the server-side time the current head commit was pushed to
+            // the PR, not pr.created_at. Otherwise a student can open a placeholder PR
+            // before the deadline and keep pushing afterwards. Never use git commit
+            // dates: they are set client-side and trivially forged.
+            let eventAt;
+            if (action === "opened" || action === "synchronize") {
+              // Both are triggered by a push; updated_at is that push's server time.
+              eventAt = pr.updated_at;
+            } else {
+              // reopened / edited do not change content. Use the earliest run of this
+              // workflow for the same head_sha so a late push cannot be laundered by
+              // closing/reopening or retitling the PR.
+              const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: "pr-check.yml",
+                event: "pull_request_target",
+                head_sha: pr.head.sha,
+                per_page: 100,
+              });
+              const times = runs
+                .filter((run) => run.id !== context.runId)
+                .map((run) => run.run_started_at || run.created_at)
+                .filter(Boolean)
+                .sort();
+              eventAt = times.length > 0 ? times[0] : pr.updated_at;
+            }
+
             fs.mkdirSync("pr-info", { recursive: true });
             fs.writeFileSync(
               "pr-info/event.json",
@@ -32,9 +63,10 @@ jobs:
                 number: pr.number,
                 title: pr.title,
                 head_sha: pr.head.sha,
-                event_at: pr.created_at
+                event_at: eventAt
               })
             );
+            core.info(`action=${action} head_sha=${pr.head.sha} event_at=${eventAt}`);
 
       - name: Upload trusted PR metadata
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

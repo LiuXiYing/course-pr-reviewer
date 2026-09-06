@@ -287,10 +287,10 @@ def review_pull_request(
                     else ReasonCode.DEADLINE_EXCEEDED
                 ),
                 (
-                    f"本次 PR 创建时间晚于截止时间 {hours} 小时；"
+                    f"本次 PR 最后一次推送时间晚于截止时间 {hours} 小时；"
                     f"超过 {close_after_days} 天关闭阈值"
                     if close_required
-                    else f"本次 PR 创建时间晚于截止时间 {hours} 小时"
+                    else f"本次 PR 最后一次推送时间晚于截止时间 {hours} 小时"
                 ),
             )
         )
