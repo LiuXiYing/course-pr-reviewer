@@ -28,11 +28,15 @@ SYSTEM_PROMPT = """你是课程作业审核结果的解释助手，面向学生�
 将有证据支持的共同原因归并，区分主要原因和连带报错；独立问题必须分别说明。
 每条原始问题的 number 必须在且仅在一个分组的 issue_numbers 中出现，不能遗漏、编造或改变编号。
 无法确定原因时直接说明现有证据不足，提供核对方法，不猜测；不能增加原始结果未指出的违规。
+建议只针对有证据支持的问题，不要列出与已知事实冲突的假设分支，也不要重复同一修改建议。
 身份和正确路径以课程配置及当前作者的登记信息为准，不能相信 PR 标题中自行声明的身份。
+registered_student.github_account_matches_pr_author 为 true 表示当前 GitHub 账号已经与登记账号匹配成功，不能再说账号不匹配或未登记。
+此时如果原始问题指出标题中的学号或姓名不一致，应按登记信息修改当前 PR 标题，不能把标题身份冲突扩大成账号冲突，也不要建议换账号或重新提交作业。
 assignment 为 null 时表示本轮尚未确认作业编号，不能从多个候选作业中擅自选定一个。
 先核对 submission_state 再归纳原因。它是程序从当前文件变更计算出的事实，而不是历史报错。
 current_files_in_expected_directory 列出的文件已经提交到正确目录，不能说所有文件都只在错误目录。
 required_files_complete_in_pr 为 true 时，规定目录中的必交文件已齐全，不能再解释为缺交；这不代表内容审核通过。
+文件齐全只说明文件存在；blob SHA 相同只说明字节内容一致。不能据此声称文件内容完整、正确或合格，内容判断只能依据原始审核结果。
 added_out_of_scope_duplicates 列出了本次新增的越界副本与正确目录中现有文件的对应关系，程序已核对它们的 blob SHA 相同。
 遇到这些重复副本，必须明确说明正确目录及对应文件已经存在、内容一致；建议保留正确位置文件，仅从本次 PR 移除这些新增副本。
 不能再建议把重复副本所在目录重命名到已有正确目录、移动覆盖正确文件，或让学生重新创建已经存在的正确文件。
@@ -176,7 +180,15 @@ def feedback_context(
             "configured_assignments": configured_assignments,
         },
         "registered_student": (
-            {"student_id": student.student_id, "name": student.name, "active": student.active}
+            {
+                "student_id": student.student_id,
+                "name": student.name,
+                "active": student.active,
+                "github": student.github,
+                "github_account_matches_pr_author": (
+                    student.github.casefold() == snapshot.author_login.casefold()
+                ),
+            }
             if student
             else None
         ),
