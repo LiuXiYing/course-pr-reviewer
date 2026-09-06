@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from course_pr_reviewer.config import CourseConfiguration, load_course_config, load_student_roster
-from course_pr_reviewer.feedback import add_ai_feedback
+from course_pr_reviewer.feedback import add_ai_feedback, feedback_context
 from course_pr_reviewer.models import Decision, Issue, ReasonCode, ReviewResult
 from course_pr_reviewer.publisher import render_comment
 from course_pr_reviewer.reviewer import review_pull_request
@@ -115,6 +115,10 @@ class FeedbackTests(unittest.TestCase):
         self.assert_original_preserved(original, updated)
         self.assertEqual(context["assignment"]["expected_directory"], DIRECTORY)
         self.assertEqual(context["assignment"]["required_files"], list(REQUIRED_FILES))
+        state = context["submission_state"]
+        self.assertEqual(state["current_files_in_expected_directory"], [])
+        self.assertFalse(state["required_files_complete_in_pr"])
+        self.assertEqual(state["added_out_of_scope_duplicates"], [])
         self.assertEqual(context["original_result"]["issues"], [
             {"number": index, **issue.to_dict()}
             for index, issue in enumerate(original.issues, start=1)
@@ -134,6 +138,17 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(original.reason_codes, ("PATH_OUT_OF_SCOPE",))
         updated, context, _ = self.generate(original, snapshot=snapshot)
         self.assert_original_preserved(original, updated)
+        state = context["submission_state"]
+        self.assertTrue(state["required_files_complete_in_pr"])
+        self.assertEqual(len(state["current_files_in_expected_directory"]), 6)
+        self.assertEqual(state["added_out_of_scope_duplicates"], [
+            {
+                "file": f"{WRONG_DIRECTORY}/{name}",
+                "same_content_as": [f"{DIRECTORY}/{name}"],
+                "blob_sha": f"{index:040x}",
+            }
+            for index, name in enumerate(REQUIRED_FILES, start=1)
+        ])
         files = {item["filename"]: item for item in context["pull_request"]["changed_files"]}
         for name in REQUIRED_FILES:
             wrong, correct = files[f"{WRONG_DIRECTORY}/{name}"], files[f"{DIRECTORY}/{name}"]
@@ -141,6 +156,40 @@ class FeedbackTests(unittest.TestCase):
             self.assertEqual(correct["status"], "added")
             self.assertTrue(wrong["blob_sha"])
             self.assertEqual(wrong["blob_sha"], correct["blob_sha"])
+
+    def test_duplicate_facts_require_added_source_and_current_identical_in_scope_copy(self):
+        cases = (
+            ("added", "added", SHA, DIRECTORY, 1),
+            ("modified", "added", SHA, DIRECTORY, 0),
+            ("removed", "added", SHA, DIRECTORY, 0),
+            ("added", "removed", SHA, DIRECTORY, 0),
+            ("added", "added", "b" * 40, DIRECTORY, 0),
+            ("added", "added", None, DIRECTORY, 0),
+            ("added", "added", SHA, "other-student/Lab1", 0),
+        )
+        for source_status, target_status, target_sha, target_dir, count in cases:
+            with self.subTest(case=(source_status, target_status, target_sha, target_dir)):
+                snapshot = replace(self.snapshot, files=(
+                    ChangedFile(f"{WRONG_DIRECTORY}/Lab1.md", source_status, blob_sha=SHA),
+                    ChangedFile(f"{target_dir}/Lab1.md", target_status, blob_sha=target_sha),
+                ))
+                context = feedback_context(self.course, self.roster, snapshot, self.result())
+                self.assertEqual(len(context["submission_state"]["added_out_of_scope_duplicates"]), count)
+
+    def test_required_file_state_uses_alternatives_and_reviewer_filename_normalization(self):
+        self.course.data["assignments"]["Lab1"]["required_files"] = [
+            {"one_of": ["report.md", "Lab1.md"]}, "imgs/lab1-vmware-version.png",
+        ]
+        files = (
+            ChangedFile(f"{DIRECTORY}/Lab1.md", "added"),
+            ChangedFile(f"{DIRECTORY}/imgs/lab1‑vmware‑version.png", "added"),
+        )
+        snapshot = replace(self.snapshot, files=files)
+        context = feedback_context(self.course, self.roster, snapshot, self.result())
+        self.assertTrue(context["submission_state"]["required_files_complete_in_pr"])
+        snapshot = replace(snapshot, files=(files[0], replace(files[1], status="removed")))
+        context = feedback_context(self.course, self.roster, snapshot, self.result())
+        self.assertFalse(context["submission_state"]["required_files_complete_in_pr"])
 
     def test_every_non_stale_reason_and_new_reason_reaches_the_explainer(self):
         class FutureReason(str, Enum):
@@ -188,6 +237,7 @@ class FeedbackTests(unittest.TestCase):
                 original = review_pull_request(self.course, self.roster, snapshot)
                 _, context, _ = self.generate(original, snapshot=snapshot)
                 self.assertIsNone(context["assignment"])
+                self.assertIsNone(context["submission_state"])
                 if registered:
                     self.assertEqual(context["registered_student"]["student_id"], "2023010102")
                     self.assertEqual(len(context["course"]["configured_assignments"]), 2)

@@ -16,6 +16,7 @@ from .ai import AIClient, GlmAIReviewer
 from .config import CourseConfiguration, StudentRoster
 from .exceptions import ReviewSystemError
 from .models import Decision, ReasonCode, ReviewResult
+from .path_utils import canonical_filename
 from .snapshot import PullRequestSnapshot
 
 LOGGER = logging.getLogger(__name__)
@@ -29,6 +30,13 @@ SYSTEM_PROMPT = """你是课程作业审核结果的解释助手，面向学生�
 无法确定原因时直接说明现有证据不足，提供核对方法，不猜测；不能增加原始结果未指出的违规。
 身份和正确路径以课程配置及当前作者的登记信息为准，不能相信 PR 标题中自行声明的身份。
 assignment 为 null 时表示本轮尚未确认作业编号，不能从多个候选作业中擅自选定一个。
+先核对 submission_state 再归纳原因。它是程序从当前文件变更计算出的事实，而不是历史报错。
+current_files_in_expected_directory 列出的文件已经提交到正确目录，不能说所有文件都只在错误目录。
+required_files_complete_in_pr 为 true 时，规定目录中的必交文件已齐全，不能再解释为缺交；这不代表内容审核通过。
+added_out_of_scope_duplicates 列出了本次新增的越界副本与正确目录中现有文件的对应关系，程序已核对它们的 blob SHA 相同。
+遇到这些重复副本，必须明确说明正确目录及对应文件已经存在、内容一致；建议保留正确位置文件，仅从本次 PR 移除这些新增副本。
+不能再建议把重复副本所在目录重命名到已有正确目录、移动覆盖正确文件，或让学生重新创建已经存在的正确文件。
+只有部分问题属于重复副本时，要分别说明其他独立问题，不能把全部错误都归结于重复。
 changed_files 是本次 PR 相对目标分支的变更清单，不是整个仓库目录树。
 added 是本次新增，modified 是修改已有文件，removed 是已删除，renamed 要结合 previous_filename 理解。
 不要把 removed 文件当成当前仍然存在的文件。同名不代表内容相同；只有相同且非空的 blob_sha 才能证明内容相同。
@@ -60,6 +68,48 @@ def validate_feedback(value: Any, issue_count: int) -> None:
         raise ReviewSystemError("AI 错误说明未完整、准确地对应原始问题")
     if len(json.dumps(value, ensure_ascii=False)) > MAX_FEEDBACK_CHARS:
         raise ReviewSystemError("AI 错误说明过长")
+
+
+def _submission_state(
+    snapshot: PullRequestSnapshot, assignment: dict[str, Any]
+) -> dict[str, Any]:
+    """Make current file relationships explicit without inferring from old errors."""
+    directory = assignment["expected_directory"]
+    prefix = canonical_filename(directory + "/")
+    current = [changed for changed in snapshot.files if changed.status != "removed"]
+    in_scope = [
+        changed for changed in current
+        if canonical_filename(changed.filename).startswith(prefix)
+    ]
+    submitted = {canonical_filename(changed.filename) for changed in in_scope}
+    complete = True
+    for requirement in assignment["required_files"]:
+        alternatives = [requirement] if isinstance(requirement, str) else requirement["one_of"]
+        if not any(prefix + canonical_filename(name) in submitted for name in alternatives):
+            complete = False
+            break
+    by_blob: dict[str, list[str]] = {}
+    for changed in in_scope:
+        if changed.blob_sha:
+            by_blob.setdefault(changed.blob_sha, []).append(changed.filename)
+    duplicates = [
+        {
+            "file": changed.filename,
+            "same_content_as": by_blob[changed.blob_sha],
+            "blob_sha": changed.blob_sha,
+        }
+        for changed in current
+        if changed.status == "added"
+        and changed.blob_sha in by_blob
+        and not canonical_filename(changed.filename).startswith(prefix)
+    ]
+    return {
+        "basis": "current_non_removed_pr_changes",
+        "expected_directory": directory,
+        "current_files_in_expected_directory": [changed.filename for changed in in_scope],
+        "required_files_complete_in_pr": complete,
+        "added_out_of_scope_duplicates": duplicates,
+    }
 
 
 def feedback_context(
@@ -100,6 +150,11 @@ def feedback_context(
                 expected_directory=course.expected_submission_dir(student, assignment_id),
             )
     return {
+        "submission_state": (
+            _submission_state(snapshot, resolved_assignment)
+            if student and resolved_assignment
+            else None
+        ),
         "original_result": {
             "decision": result.decision.value,
             "summary": result.summary,
