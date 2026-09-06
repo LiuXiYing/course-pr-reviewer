@@ -5,12 +5,14 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from openpyxl import Workbook
 
 from course_pr_reviewer.cli import main
 from course_pr_reviewer.models import Decision, Issue, ReasonCode, ReviewResult
+from course_pr_reviewer.publisher import load_result
+from course_pr_reviewer.snapshot import snapshot_from_dict
 
 ROOT = Path(__file__).parents[1]
 
@@ -192,6 +194,67 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(exit_code, 0)
             self.assertIn("2023010102", output.read_text(encoding="utf-8"))
+
+    def test_review_persists_original_before_feedback_and_keeps_failure_exit_code(self):
+        snapshot = snapshot_from_dict({
+            "repository": "teacher/course", "number": 24,
+            "title": "错误的标题", "author_login": "example-user",
+            "captured_head_sha": "a" * 40, "current_head_sha": "a" * 40,
+            "event_at": "2026-09-01T12:00:00+08:00", "files": [],
+        })
+        for fail in (False, True):
+            with self.subTest(provider_fails=fail), tempfile.TemporaryDirectory() as directory:
+                result_path = Path(directory) / "result.json"
+                output_path = Path(directory) / "github-output"
+                client = Mock()
+                saved_before_feedback = []
+
+                def complete(**kwargs):
+                    saved = load_result(result_path)
+                    self.assertEqual(saved["decision"], "FAIL")
+                    self.assertEqual(saved["reason_codes"], ["TITLE_MISMATCH"])
+                    self.assertNotIn("ai_feedback", saved["metadata"])
+                    saved_before_feedback.append(saved)
+                    if fail:
+                        raise TimeoutError("feedback provider timed out")
+                    return {"choices": [{"message": {"content": json.dumps({
+                        "summary": "请修正标题。",
+                        "groups": [{
+                            "title": "标题格式有误", "issue_numbers": [1],
+                            "explanation": "标题不符合课程规定。",
+                            "suggestions": ["按原始要求更新当前 PR 标题。"],
+                        }],
+                    }, ensure_ascii=False)}}]}
+
+                client.complete.side_effect = complete
+                with (
+                    patch.dict(os.environ, {
+                        "GLM_API_KEY": "test-key", "GITHUB_OUTPUT": str(output_path),
+                    }, clear=True),
+                    patch("course_pr_reviewer.cli.load_snapshot", return_value=snapshot),
+                    patch("course_pr_reviewer.cli.GlmClient", return_value=client),
+                    patch("course_pr_reviewer.feedback.LOGGER"),
+                    redirect_stdout(io.StringIO()),
+                ):
+                    exit_code = main([
+                        "review", "--config", str(ROOT / "examples/course-review.yml"),
+                        "--students", str(ROOT / "examples/students.yml"),
+                        "--metadata-dir", directory, "--result-file", str(result_path),
+                    ])
+                result = load_result(result_path)
+                self.assertEqual(exit_code, 1)
+                client.complete.assert_called_once()
+                self.assertEqual(len(saved_before_feedback), 1)
+                original = saved_before_feedback[0]
+                self.assertEqual(result["summary"], original["summary"])
+                self.assertEqual(result["issues"], original["issues"])
+                self.assertEqual(result["reason_codes"], original["reason_codes"])
+                self.assertEqual(result["decision"], original["decision"])
+                self.assertEqual(
+                    result["metadata"]["ai_feedback"]["status"],
+                    "unavailable" if fail else "generated",
+                )
+                self.assertIn("decision=FAIL", output_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

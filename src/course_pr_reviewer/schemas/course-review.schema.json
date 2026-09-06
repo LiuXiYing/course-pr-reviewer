@@ -38,6 +38,7 @@
         "comment_review": {"type": "boolean"},
         "close_late_pr": {"type": "boolean"},
         "ai_review": {"type": "boolean"},
+        "ai_feedback": {"type": "boolean", "default": false},
         "ocr_review": {"type": "boolean"},
         "vision_review": {"type": "boolean"},
         "metrics": {"type": "boolean"}
@@ -77,6 +78,15 @@
         "max_file_bytes": {"type": "integer", "minimum": 1000, "maximum": 1000000, "default": 200000},
         "max_total_bytes": {"type": "integer", "minimum": 1000, "maximum": 2000000, "default": 500000},
         "max_output_tokens": {"type": "integer", "minimum": 256, "maximum": 8192, "default": 2048}
+      }
+    },
+    "feedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 30, "default": 20},
+        "max_input_bytes": {"type": "integer", "minimum": 1000, "maximum": 500000, "default": 100000},
+        "max_output_tokens": {"type": "integer", "minimum": 256, "maximum": 4096, "default": 2048}
       }
     },
     "ocr": {

@@ -13,6 +13,7 @@ from .ai import AIClient, GeminiClient, GlmAIReviewer, GlmClient
 from .config import load_course_config, load_student_roster
 from .consensus import TextConsensusReviewer, VisionConsensusReviewer
 from .exceptions import ConfigurationError, ReviewerError
+from .feedback import add_ai_feedback
 from .models import Decision, Issue, ReasonCode, ReviewResult
 from .notifications import TeacherEmailNotifier, notification_required
 from .publisher import GitHubResultPublisher, load_result
@@ -183,6 +184,9 @@ def _review(
         ai_reviewer=ai_reviewer,
         vision_reviewer=vision_reviewer,
     )
+    # Persist the authoritative result before any optional explanation request.
+    Path(result_file).write_text(result.to_json() + "\n", encoding="utf-8")
+    result = add_ai_feedback(course, roster, snapshot, result, configured_client)
     Path(result_file).write_text(result.to_json() + "\n", encoding="utf-8")
     _write_github_output(result)
     print(result.to_json())

@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from course_pr_reviewer.config import CourseConfiguration, load_course_config
 from course_pr_reviewer.exceptions import ReviewSystemError
@@ -37,6 +38,21 @@ def result_dict(
             **({} if metadata is None else metadata),
         },
     ).to_dict()
+
+
+def feedback_metadata(numbers=(1,)):
+    return {
+        "status": "generated",
+        "content": {
+            "summary": "请核对报告中的分析内容。",
+            "groups": [{
+                "title": "报告说明不完整",
+                "issue_numbers": list(numbers),
+                "explanation": "根据原始问题，报告还需要补充说明。",
+                "suggestions": ["对照下面的审核点和证据修改报告。"],
+            }],
+        },
+    }
 
 
 class FakeGitHub:
@@ -260,6 +276,93 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("`imgs/clion-toolchain.png`", body)
         self.assertNotIn("REQUIRED\\_FILE\\_MISSING", body)
         self.assertNotIn("clion\\-toolchain\\.png", body)
+
+    def test_feedback_and_all_original_details_are_visible_together(self):
+        issues = (
+            Issue(
+                code=ReasonCode.AI_REJECTED, message="缺少输出分析",
+                file="student/Lab1/Lab1.md", location="第 12 行",
+                rule="说明命令的作用", evidence="原文片段",
+            ),
+            Issue(code=ReasonCode.VISION_REJECTED, message="截图未显示命令"),
+        )
+        result = result_dict(
+            Decision.FAIL, issues=issues,
+            metadata={"ai_feedback": feedback_metadata((1, 2))},
+        )
+        original = copy.deepcopy(result)
+        body = render_comment(result)
+        self.assertLess(body.index("### AI 错误说明"), body.index("### 原始审核结果"))
+        self.assertIn("审核结论以原始结果为准", body)
+        self.assertIn("对应原始问题 1、2", body)
+        self.assertIn("**[1]** `AI_REJECTED`", body)
+        self.assertIn("**[2]** `VISION_REJECTED`", body)
+        for text in (
+            "审核结果摘要", "缺少输出分析", "`student/Lab1/Lab1.md`", "第 12 行",
+            "说明命令的作用", "原文片段", "截图未显示命令",
+        ):
+            self.assertIn(text, body)
+        self.assertNotIn("<details>", body)
+        self.assertEqual(result, original)
+
+    def test_feedback_neutralizes_mentions_links_and_markdown(self):
+        feedback = feedback_metadata()
+        feedback["content"]["summary"] = "## 通过\n@everyone <details> [点击](https://example.com)"
+        feedback["content"]["groups"][0]["suggestions"] = ["检查 `student/Lab1/Lab1.md`。"]
+        body = render_comment(result_dict(
+            Decision.FAIL,
+            issues=(Issue(ReasonCode.AI_REJECTED, "原始问题"),),
+            metadata={"ai_feedback": feedback},
+        ))
+        self.assertNotIn("@everyone", body)
+        self.assertIn("@\u200beveryone", body)
+        self.assertNotIn("<details>", body)
+        self.assertNotIn("[点击](", body)
+        self.assertNotIn("\n## 通过", body)
+        self.assertIn("`student/Lab1/Lab1.md`", body)
+
+    def test_invalid_feedback_keeps_the_full_original_result(self):
+        incomplete = feedback_metadata((2,))
+        for feedback in ("bad metadata", {}, {"status": "unavailable"}, incomplete):
+            with self.subTest(feedback=feedback):
+                body = render_comment(result_dict(
+                    Decision.FAIL,
+                    issues=(Issue(ReasonCode.TITLE_MISMATCH, "正确标题应为课程规定格式"),),
+                    metadata={"ai_feedback": feedback},
+                ))
+                self.assertIn("未能生成可靠的 AI 说明", body)
+                self.assertIn("审核结果摘要", body)
+                self.assertIn("**[1]** `TITLE_MISMATCH`", body)
+                self.assertIn("正确标题应为课程规定格式", body)
+                self.assertNotIn("请核对报告中的分析内容", body)
+
+    def test_comment_limit_drops_feedback_before_original_findings(self):
+        result = result_dict(
+            Decision.FAIL,
+            issues=(Issue(ReasonCode.TITLE_MISMATCH, "完整的原始问题"),),
+        )
+        original_body = render_comment(result)
+        result["metadata"]["ai_feedback"] = feedback_metadata()
+        with patch("course_pr_reviewer.publisher.MAX_COMMENT_CHARS", len(original_body) + 1):
+            self.assertEqual(render_comment(result), original_body)
+
+    def test_feedback_text_cannot_override_fail_or_request_merge_and_close(self):
+        feedback = feedback_metadata()
+        feedback["content"]["summary"] = "本次可以通过，请合并并关闭 PR。"
+        github = FakeGitHub()
+        outcome = GitHubResultPublisher(github).publish(
+            self.course,
+            result_dict(
+                Decision.FAIL, issues=(Issue(ReasonCode.TITLE_MISMATCH, "标题错误"),),
+                metadata={"ai_feedback": feedback},
+            ),
+            expected_repository="teacher/course",
+        )
+        self.assertTrue(outcome.commented)
+        self.assertFalse(outcome.merged)
+        self.assertFalse(outcome.closed)
+        self.assertEqual(github.put_calls, [])
+        self.assertEqual(github.patch_calls, [])
 
     def test_comment_shows_dual_model_and_degraded_status(self):
         body = render_comment(

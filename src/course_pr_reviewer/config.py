@@ -97,6 +97,16 @@ class CourseConfiguration:
         return int(self.data.get("ai", {}).get("consensus_rounds", 1))
 
     @property
+    def feedback(self) -> dict[str, Any]:
+        defaults = {
+            "timeout_seconds": 20,
+            "max_input_bytes": 100_000,
+            "max_output_tokens": 2048,
+        }
+        defaults.update(self.data.get("feedback", {}))
+        return defaults
+
+    @property
     def ocr(self) -> dict[str, Any]:
         defaults: dict[str, Any] = {
             "detection_model": "PP-OCRv6_small_det",

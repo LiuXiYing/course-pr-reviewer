@@ -11,6 +11,7 @@ class SchemaTests(unittest.TestCase):
         for name in (
             "ai-review.schema.json",
             "course-review.schema.json",
+            "feedback.schema.json",
             "students.schema.json",
             "review-result.schema.json",
             "vision-review.schema.json",

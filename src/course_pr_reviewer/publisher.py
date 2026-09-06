@@ -14,6 +14,7 @@ from jsonschema import Draft202012Validator
 
 from .config import CourseConfiguration
 from .exceptions import ReviewSystemError
+from .feedback import validate_feedback
 from .models import Decision, ReasonCode
 from .snapshot import REPOSITORY_RE, SHA_RE, GitHubClient
 
@@ -93,6 +94,44 @@ def _safe_markdown_with_code(value: Any) -> str:
     return "".join(parts)
 
 
+def _feedback_lines(result: dict[str, Any]) -> list[str]:
+    feedback = result.get("metadata", {}).get("ai_feedback")
+    if feedback is None or result["decision"] == Decision.PASS.value:
+        return []
+    lines = ["", "### AI 错误说明（辅助参考）", ""]
+    content = feedback.get("content") if isinstance(feedback, dict) else None
+    try:
+        if not isinstance(feedback, dict) or feedback.get("status") != "generated":
+            raise ReviewSystemError("AI 错误说明不可用")
+        validate_feedback(content, len(result.get("issues", [])))
+    except ReviewSystemError:
+        return lines + ["本次未能生成可靠的 AI 说明，请根据下方完整的原始审核结果处理。"]
+
+    lines.extend(
+        [
+            "> 以下说明由 AI 生成，请按问题编号与下方原始审核结果对照；审核结论以原始结果为准。",
+            "",
+            _safe_markdown_with_code(content["summary"]),
+        ]
+    )
+    for group in content["groups"]:
+        numbers = "、".join(str(number) for number in group["issue_numbers"])
+        lines.extend(
+            [
+                "",
+                f"**{_safe_markdown(group['title'])}**（对应原始问题 {numbers}）",
+                "",
+                _safe_markdown_with_code(group["explanation"]),
+                "",
+                *[
+                    f"- {_safe_markdown_with_code(suggestion)}"
+                    for suggestion in group["suggestions"]
+                ],
+            ]
+        )
+    return lines
+
+
 def render_comment(result: dict[str, Any]) -> str:
     decision = Decision(result["decision"])
     headings = {
@@ -101,12 +140,12 @@ def render_comment(result: dict[str, Any]) -> str:
         Decision.MANUAL_REVIEW: "PR 无法自动确认 ⚠️",
         Decision.ERROR: "PR 审核系统错误 🚨",
     }
-    lines = [
-        COMMENT_MARKER,
-        f"## {headings[decision]}",
-        "",
-        _safe_markdown_with_code(result["summary"]),
-    ]
+    lines = [COMMENT_MARKER, f"## {headings[decision]}"]
+    feedback_lines = _feedback_lines(result)
+    if feedback_lines:
+        lines.extend(feedback_lines)
+        lines.extend(["", "### 原始审核结果（判定依据）"])
+    lines.extend(["", _safe_markdown_with_code(result["summary"])])
     metadata = result.get("metadata", {})
     notification_status = metadata.get("teacher_email_notification")
     if notification_status == "sent":
@@ -144,14 +183,18 @@ def render_comment(result: dict[str, Any]) -> str:
     issues = result.get("issues", [])
     if issues:
         lines.extend(["", "### 具体问题", ""])
-        for item in issues:
+        for number, item in enumerate(issues, start=1):
             code = _inline_code(item["code"])
             message = _safe_markdown_with_code(item["message"])
             file = item.get("file")
             label = code
             if file:
                 label += f" · {_inline_code(file)}"
-            lines.append(f"- {label}：{message}")
+            lines.append(f"- **[{number}]** {label}：{message}")
+            if item.get("location"):
+                lines.append(
+                    f"  - 位置：{_safe_markdown_with_code(item['location'])}"
+                )
             if item.get("rule"):
                 lines.append(
                     f"  - 审核点：{_safe_markdown_with_code(item['rule'])}"
@@ -169,6 +212,16 @@ def render_comment(result: dict[str, Any]) -> str:
         ]
     )
     body = "\n".join(lines)
+    if len(body) > MAX_COMMENT_CHARS and feedback_lines:
+        # The optional explanation must never crowd out the original findings.
+        return render_comment(
+            {
+                **result,
+                "metadata": {
+                    key: value for key, value in metadata.items() if key != "ai_feedback"
+                },
+            }
+        )
     if len(body) > MAX_COMMENT_CHARS:
         raise ReviewSystemError("生成的 PR 评论超过 60000 字符安全上限")
     return body
