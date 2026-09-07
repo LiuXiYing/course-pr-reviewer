@@ -21,24 +21,32 @@ from .snapshot import PullRequestSnapshot
 
 LOGGER = logging.getLogger(__name__)
 MAX_FEEDBACK_CHARS = 12_000
+PRE_FILE_REASONS = {
+    ReasonCode.UNKNOWN_GITHUB_USER,
+    ReasonCode.INACTIVE_STUDENT,
+    ReasonCode.IDENTITY_MISMATCH,
+    ReasonCode.TITLE_MISMATCH,
+    ReasonCode.ASSIGNMENT_NOT_CONFIGURED,
+}
 
 SYSTEM_PROMPT = """你是课程作业审核结果的解释助手，面向学生用简洁中文说明原因和修改办法。
 你的任务是解释已经产生的原始审核结果，不是重新审核作业，也没有修改判定、合并或关闭 PR 的权限。
 对任何错误代码都应结合 message、file、location、rule、evidence 和课程规则理解，不能只处理预设的错误种类。
 将有证据支持的共同原因归并，区分主要原因和连带报错；独立问题必须分别说明。
 每条原始问题的 number 必须在且仅在一个分组的 issue_numbers 中出现，不能遗漏、编造或改变编号。
-无法确定原因时直接说明现有证据不足，提供核对方法，不猜测；不能增加原始结果未指出的违规。
+无法确定原因时直接说明现有证据不足，提供核对方法，不猜测；摘要、分组标题、解释和建议均不能增加原始结果未指出的违规。
 建议只针对有证据支持的问题，不要列出与已知事实冲突的假设分支，也不要重复同一修改建议。
 身份和正确路径以课程配置及当前作者的登记信息为准，不能相信 PR 标题中自行声明的身份。
 registered_student.github_account_matches_pr_author 为 true 表示当前 GitHub 账号已经与登记账号匹配成功，不能再说账号不匹配或未登记。
 此时如果原始问题指出标题中的学号或姓名不一致，应按登记信息修改当前 PR 标题，不能把标题身份冲突扩大成账号冲突，也不要建议换账号或重新提交作业。
 assignment 为 null 时表示本轮尚未确认作业编号，不能从多个候选作业中擅自选定一个。
+标题或身份检查未通过时，不提供文件变更及目录状态；不能推测目录、重复文件、缺交或内容问题。
 先核对 submission_state 再归纳原因。它是程序从当前文件变更计算出的事实，而不是历史报错。
 current_files_in_expected_directory 列出的文件已经提交到正确目录，不能说所有文件都只在错误目录。
 required_files_complete_in_pr 为 true 时，规定目录中的必交文件已齐全，不能再解释为缺交；这不代表内容审核通过。
 文件齐全只说明文件存在；blob SHA 相同只说明字节内容一致。不能据此声称文件内容完整、正确或合格，内容判断只能依据原始审核结果。
 added_out_of_scope_duplicates 列出了本次新增的越界副本与正确目录中现有文件的对应关系，程序已核对它们的 blob SHA 相同。
-遇到这些重复副本，必须明确说明正确目录及对应文件已经存在、内容一致；建议保留正确位置文件，仅从本次 PR 移除这些新增副本。
+只有原始问题已经指出对应文件越界时，才使用这些副本信息解释该问题，明确说明正确目录及对应文件已经存在、内容一致；建议保留正确位置文件，仅从本次 PR 移除这些新增副本。
 不能再建议把重复副本所在目录重命名到已有正确目录、移动覆盖正确文件，或让学生重新创建已经存在的正确文件。
 只有部分问题属于重复副本时，要分别说明其他独立问题，不能把全部错误都归结于重复。
 changed_files 是本次 PR 相对目标分支的变更清单，不是整个仓库目录树。
@@ -72,6 +80,39 @@ def validate_feedback(value: Any, issue_count: int) -> None:
         raise ReviewSystemError("AI 错误说明未完整、准确地对应原始问题")
     if len(json.dumps(value, ensure_ascii=False)) > MAX_FEEDBACK_CHARS:
         raise ReviewSystemError("AI 错误说明过长")
+
+
+def _title_feedback(result: ReviewResult) -> dict[str, Any] | None:
+    """Explain deterministic title findings without depending on a model."""
+    guidance = {
+        ReasonCode.TITLE_MISMATCH: (
+            "PR 标题需要修正",
+            "请按上述要求修改当前 PR 的标题，保留作业编号；保存标题后会自动重新审核。",
+        ),
+        ReasonCode.ASSIGNMENT_NOT_CONFIGURED: (
+            "作业编号需要核对",
+            "请核对本次作业编号及大小写；若该作业尚未配置或启用，请联系教师确认。",
+        ),
+    }
+    if any(issue.code not in guidance for issue in result.issues):
+        return None
+    content = {
+        "summary": result.summary,
+        "groups": [
+            {
+                "title": guidance[issue.code][0],
+                "issue_numbers": [number],
+                "explanation": issue.message,
+                "suggestions": [
+                    guidance[issue.code][1],
+                    "标题修正后还需等待后续审核，不代表文件和作业内容已经通过。",
+                ],
+            }
+            for number, issue in enumerate(result.issues, start=1)
+        ],
+    }
+    validate_feedback(content, len(result.issues))
+    return {"status": "generated", "source": "rules", "content": content}
 
 
 def _submission_state(
@@ -153,10 +194,14 @@ def feedback_context(
                 expected_title=course.expected_title(student, assignment_id),
                 expected_directory=course.expected_submission_dir(student, assignment_id),
             )
+    include_files = bool(
+        student and resolved_assignment
+        and any(issue.code not in PRE_FILE_REASONS for issue in result.issues)
+    )
     return {
         "submission_state": (
             _submission_state(snapshot, resolved_assignment)
-            if student and resolved_assignment
+            if include_files
             else None
         ),
         "original_result": {
@@ -205,7 +250,7 @@ def feedback_context(
                     "previous_filename": changed.previous_filename,
                     "blob_sha": changed.blob_sha,
                 }
-                for changed in snapshot.files
+                for changed in snapshot.files if include_files
             ],
         },
     }
@@ -230,6 +275,9 @@ def add_ai_feedback(
 
     feedback: dict[str, Any] = {"status": "unavailable", "reason": "no_provider"}
     try:
+        title_feedback = _title_feedback(result)
+        if title_feedback is not None:
+            return replace(result, metadata={**result.metadata, "ai_feedback": title_feedback})
         context = json.dumps(
             feedback_context(course, roster, snapshot, result),
             ensure_ascii=False,
@@ -263,6 +311,7 @@ def add_ai_feedback(
                     validate_feedback(content, len(result.issues))
                     feedback = {
                         "status": "generated",
+                        "source": "ai",
                         "provider": provider["provider"],
                         "model": provider["model"],
                         "content": content,

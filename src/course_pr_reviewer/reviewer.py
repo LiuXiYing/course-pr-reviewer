@@ -38,6 +38,19 @@ def _issue(code: ReasonCode, message: str, *, file: str | None = None) -> Issue:
     return Issue(code=code, message=message, file=file)
 
 
+def _enabled_title_examples(course: CourseConfiguration, student: Student) -> str:
+    enabled = [
+        key for key, assignment in course.assignments.items()
+        if assignment.get("enabled", True)
+    ]
+    if not enabled:
+        return "当前没有已启用的作业，请联系教师确认。"
+    examples = "、".join(
+        f"`{course.expected_title(student, key)}`" for key in enabled[:3]
+    )
+    return f"已启用作业的标题示例：{examples}。请按本次实际提交的作业选择编号。"
+
+
 def _configured_assignment_for_path(
     course: CourseConfiguration, student: Student, filename: str
 ) -> str | None:
@@ -148,13 +161,16 @@ def review_pull_request(
     )
     match = _title_regex(title_template).fullmatch(snapshot.title)
     if not match:
+        missing_assignment = snapshot.title == course.expected_title(student, "")
+        detail = "标题缺少作业编号。" if missing_assignment else ""
         return ReviewResult(
             decision=Decision.FAIL,
             summary="PR 标题不符合课程规范。",
             issues=(
                 _issue(
                     ReasonCode.TITLE_MISMATCH,
-                    f"当前标题：`{snapshot.title}`；要求格式：`{title_template}`",
+                    f"{detail}当前标题：`{snapshot.title}`；要求格式：`{title_template}`。"
+                    + _enabled_title_examples(course, student),
                 ),
             ),
             metadata=metadata,
@@ -182,14 +198,57 @@ def review_pull_request(
 
     assignment_id = fields["assignment_id"]
     assignment = course.assignment(assignment_id)
-    if assignment is None or not assignment.get("enabled", True):
+    if assignment is None:
+        case_matches = [
+            key for key in course.assignments
+            if key.casefold() == assignment_id.casefold()
+        ]
+        if len(case_matches) == 1:
+            canonical_id = case_matches[0]
+            if course.assignments[canonical_id].get("enabled", True):
+                expected_title = course.expected_title(student, canonical_id)
+                return ReviewResult(
+                    decision=Decision.FAIL,
+                    summary="PR 标题中的作业编号大小写不正确。",
+                    issues=(
+                        _issue(
+                            ReasonCode.TITLE_MISMATCH,
+                            f"作业编号区分大小写：当前为 `{assignment_id}`，"
+                            f"应为 `{canonical_id}`。正确标题应为：`{expected_title}`",
+                        ),
+                    ),
+                    metadata=metadata,
+                )
+            message = (
+                f"标题中的 `{assignment_id}` 与配置的 `{canonical_id}` 大小写不同，"
+                f"且作业 `{canonical_id}` 尚未启用，请联系教师确认开放时间。"
+            )
+        elif case_matches:
+            message = (
+                f"作业 `{assignment_id}` 未配置，且存在多个仅大小写不同的候选编号。"
+                + _enabled_title_examples(course, student)
+            )
+        else:
+            message = (
+                f"作业 `{assignment_id}` 未配置。"
+                + _enabled_title_examples(course, student)
+            )
         return ReviewResult(
             decision=Decision.FAIL,
             summary="PR 标题中的作业未配置或未启用。",
             issues=(
+                _issue(ReasonCode.ASSIGNMENT_NOT_CONFIGURED, message),
+            ),
+            metadata=metadata,
+        )
+    if not assignment.get("enabled", True):
+        return ReviewResult(
+            decision=Decision.FAIL,
+            summary="PR 标题中的作业尚未启用。",
+            issues=(
                 _issue(
                     ReasonCode.ASSIGNMENT_NOT_CONFIGURED,
-                    f"作业 {assignment_id} 未配置或未启用",
+                    f"作业 `{assignment_id}` 已配置但未启用，请联系教师确认开放时间。",
                 ),
             ),
             metadata=metadata,

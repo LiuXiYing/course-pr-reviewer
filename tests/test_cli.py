@@ -198,7 +198,7 @@ class CliTests(unittest.TestCase):
     def test_review_persists_original_before_feedback_and_keeps_failure_exit_code(self):
         snapshot = snapshot_from_dict({
             "repository": "teacher/course", "number": 24,
-            "title": "错误的标题", "author_login": "example-user",
+            "title": "[2023010102刘西莹]Lab1作业提交", "author_login": "example-user",
             "captured_head_sha": "a" * 40, "current_head_sha": "a" * 40,
             "event_at": "2026-09-01T12:00:00+08:00", "files": [],
         })
@@ -212,17 +212,17 @@ class CliTests(unittest.TestCase):
                 def complete(**kwargs):
                     saved = load_result(result_path)
                     self.assertEqual(saved["decision"], "FAIL")
-                    self.assertEqual(saved["reason_codes"], ["TITLE_MISMATCH"])
+                    self.assertEqual(saved["reason_codes"], ["NO_FILES_CHANGED"])
                     self.assertNotIn("ai_feedback", saved["metadata"])
                     saved_before_feedback.append(saved)
                     if fail:
                         raise TimeoutError("feedback provider timed out")
                     return {"choices": [{"message": {"content": json.dumps({
-                        "summary": "请修正标题。",
+                        "summary": "请提交本次作业的文件。",
                         "groups": [{
-                            "title": "标题格式有误", "issue_numbers": [1],
-                            "explanation": "标题不符合课程规定。",
-                            "suggestions": ["按原始要求更新当前 PR 标题。"],
+                            "title": "缺少文件变更", "issue_numbers": [1],
+                            "explanation": "PR 不包含任何文件变更。",
+                            "suggestions": ["按课程要求提交文件并更新当前 PR。"],
                         }],
                     }, ensure_ascii=False)}}]}
 

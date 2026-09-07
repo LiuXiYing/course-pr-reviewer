@@ -72,7 +72,7 @@ class FeedbackTests(unittest.TestCase):
             ),
         )
 
-    def result(self, code=ReasonCode.TITLE_MISMATCH, decision=Decision.FAIL):
+    def result(self, code=ReasonCode.PATH_OUT_OF_SCOPE, decision=Decision.FAIL):
         return ReviewResult(
             decision=decision, summary="原始审核摘要", confidence=0.9,
             issues=(Issue(
@@ -191,11 +191,15 @@ class FeedbackTests(unittest.TestCase):
         context = feedback_context(self.course, self.roster, snapshot, self.result())
         self.assertFalse(context["submission_state"]["required_files_complete_in_pr"])
 
-    def test_every_non_stale_reason_and_new_reason_reaches_the_explainer(self):
+    def test_other_non_stale_reasons_and_new_reason_reach_the_explainer(self):
         class FutureReason(str, Enum):
             FUTURE_COURSE_RULE = "FUTURE_COURSE_RULE"
 
-        codes = [code for code in ReasonCode if code is not ReasonCode.STALE_HEAD_SHA]
+        codes = [code for code in ReasonCode if code not in {
+            ReasonCode.STALE_HEAD_SHA,
+            ReasonCode.TITLE_MISMATCH,
+            ReasonCode.ASSIGNMENT_NOT_CONFIGURED,
+        }]
         for code in [*codes, FutureReason.FUTURE_COURSE_RULE]:
             with self.subTest(code=code):
                 original = self.result(code)
@@ -205,6 +209,65 @@ class FeedbackTests(unittest.TestCase):
                     {"number": 1, **original.issues[0].to_dict()}
                 ])
                 self.assertEqual(updated.metadata["ai_feedback"]["status"], "generated")
+
+    def test_title_failures_produce_rule_guidance_without_calling_a_provider(self):
+        factory = Mock(side_effect=AssertionError("title feedback must not call AI"))
+        for title, code in (
+            ("[2023010102刘西莹]lab1作业提交", "TITLE_MISMATCH"),
+            ("[2023010102刘西莹]作业提交", "TITLE_MISMATCH"),
+            ("[2023010102刘西莹]Lab99作业提交", "ASSIGNMENT_NOT_CONFIGURED"),
+        ):
+            with self.subTest(title=title):
+                # The PR also contains duplicates, but this run only found a title error.
+                snapshot = replace(self.snapshot, title=title, files=self.snapshot.files + tuple(
+                    replace(changed, filename=changed.filename.replace(WRONG_DIRECTORY, DIRECTORY))
+                    for changed in self.snapshot.files
+                ))
+                original = review_pull_request(self.course, self.roster, snapshot)
+                self.assertEqual(original.reason_codes, (code,))
+                updated = add_ai_feedback(self.course, self.roster, snapshot, original, factory)
+                self.assert_original_preserved(original, updated)
+                self.assertEqual(updated.metadata["ai_feedback"]["source"], "rules")
+                body = render_comment(updated.to_dict())
+                self.assertIn("### 修改建议（规则生成）", body)
+                self.assertIn("### 原始审核结果（判定依据）", body)
+                self.assertIn("`[2023010102刘西莹]Lab1作业提交`", body)
+                self.assertNotIn("AI", body)
+                self.assertNotIn("越界", body)
+                self.assertNotIn("重复", body)
+        factory.assert_not_called()
+
+    def test_title_hint_remains_available_when_feedback_is_disabled(self):
+        self.course.data["features"]["ai_feedback"] = False
+        snapshot = replace(self.snapshot, title="[2023010102刘西莹]lab1作业提交")
+        original = review_pull_request(self.course, self.roster, snapshot)
+        factory = Mock()
+        updated = add_ai_feedback(self.course, self.roster, snapshot, original, factory)
+        self.assertIs(updated, original)
+        self.assertIn("`[2023010102刘西莹]Lab1作业提交`", render_comment(updated.to_dict()))
+        factory.assert_not_called()
+
+    def test_title_and_identity_context_does_not_expose_unreviewed_file_facts(self):
+        for code in (
+            ReasonCode.TITLE_MISMATCH, ReasonCode.ASSIGNMENT_NOT_CONFIGURED,
+            ReasonCode.IDENTITY_MISMATCH, ReasonCode.UNKNOWN_GITHUB_USER,
+            ReasonCode.INACTIVE_STUDENT,
+        ):
+            with self.subTest(code=code):
+                context = feedback_context(self.course, self.roster, self.snapshot, self.result(code))
+                self.assertEqual(context["pull_request"]["changed_files"], [])
+                self.assertIsNone(context["submission_state"])
+
+    def test_mixed_title_and_file_issues_still_receive_complete_ai_feedback(self):
+        original = replace(self.result(), issues=(
+            Issue(ReasonCode.TITLE_MISMATCH, "标题需要修改"),
+            self.result().issues[0],
+        ))
+        updated, context, _ = self.generate(original)
+        self.assert_original_preserved(original, updated)
+        self.assertEqual(updated.metadata["ai_feedback"]["source"], "ai")
+        self.assertEqual(len(context["original_result"]["issues"]), 2)
+        self.assertTrue(context["pull_request"]["changed_files"])
 
     def test_all_non_pass_decisions_are_preserved(self):
         for decision in (Decision.FAIL, Decision.MANUAL_REVIEW, Decision.ERROR):
@@ -238,6 +301,7 @@ class FeedbackTests(unittest.TestCase):
                 _, context, _ = self.generate(original, snapshot=snapshot)
                 self.assertIsNone(context["assignment"])
                 self.assertIsNone(context["submission_state"])
+                self.assertEqual(context["pull_request"]["changed_files"], [])
                 if registered:
                     self.assertEqual(context["registered_student"]["student_id"], "2023010102")
                     self.assertEqual(len(context["course"]["configured_assignments"]), 2)

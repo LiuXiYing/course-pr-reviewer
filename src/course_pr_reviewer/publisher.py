@@ -98,18 +98,27 @@ def _feedback_lines(result: dict[str, Any]) -> list[str]:
     feedback = result.get("metadata", {}).get("ai_feedback")
     if feedback is None or result["decision"] == Decision.PASS.value:
         return []
-    lines = ["", "### AI 错误说明（辅助参考）", ""]
+    rule_based = isinstance(feedback, dict) and feedback.get("source") == "rules"
+    heading = "修改建议（规则生成）" if rule_based else "AI 错误说明（辅助参考）"
+    lines = ["", f"### {heading}", ""]
     content = feedback.get("content") if isinstance(feedback, dict) else None
     try:
         if not isinstance(feedback, dict) or feedback.get("status") != "generated":
             raise ReviewSystemError("AI 错误说明不可用")
         validate_feedback(content, len(result.get("issues", [])))
     except ReviewSystemError:
+        if rule_based:
+            return lines + ["请根据下方完整的原始审核结果处理。"]
         return lines + ["本次未能生成可靠的 AI 说明，请根据下方完整的原始审核结果处理。"]
 
+    notice = (
+        "> 以下建议根据课程配置和原始审核结果生成。"
+        if rule_based
+        else "> 以下说明由 AI 生成，请按问题编号与下方原始审核结果对照；审核结论以原始结果为准。"
+    )
     lines.extend(
         [
-            "> 以下说明由 AI 生成，请按问题编号与下方原始审核结果对照；审核结论以原始结果为准。",
+            notice,
             "",
             _safe_markdown_with_code(content["summary"]),
         ]

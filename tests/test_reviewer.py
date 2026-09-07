@@ -85,6 +85,92 @@ class DeterministicReviewerTests(unittest.TestCase):
         )
         self.assertIn(ReasonCode.TITLE_MISMATCH, self.codes(result))
 
+    def test_assignment_case_error_gives_the_exact_title_without_accepting_it(self):
+        for template in (
+            "[{student_id}{student_name}]{assignment_id}作业提交",
+            "[{student_identity}]{assignment_id}作业提交",
+        ):
+            self.course.data["course"]["title_template"] = template
+            for assignment_id in ("lab1", "LAB1", "lAb1"):
+                with self.subTest(template=template, assignment=assignment_id):
+                    result = review_pull_request(
+                        self.course, self.roster,
+                        self.snapshot(title=f"[2023010102刘西莹]{assignment_id}作业提交"),
+                    )
+                    self.assertEqual(result.decision, Decision.FAIL)
+                    self.assertEqual(result.reason_codes, ("TITLE_MISMATCH",))
+                    self.assertIn("大小写", result.issues[0].message)
+                    self.assertIn(f"`{assignment_id}`", result.issues[0].message)
+                    self.assertIn("`[2023010102刘西莹]Lab1作业提交`", result.issues[0].message)
+                    self.assertNotIn("assignment_id", result.metadata)
+
+    def test_missing_assignment_gives_enabled_titles_without_guessing(self):
+        result = review_pull_request(
+            self.course, self.roster,
+            self.snapshot(title="[2023010102刘西莹]作业提交"),
+        )
+        self.assertEqual(result.reason_codes, ("TITLE_MISMATCH",))
+        message = result.issues[0].message
+        self.assertIn("缺少作业编号", message)
+        self.assertIn("`[2023010102刘西莹]Lab1作业提交`", message)
+        self.assertIn("`[2023010102刘西莹]Lab2作业提交`", message)
+        self.assertNotIn("正确标题应为", message)
+        self.assertNotIn("assignment_id", result.metadata)
+
+    def test_disabled_assignment_is_not_reported_as_just_a_case_error(self):
+        self.course.data["assignments"]["Lab1"]["enabled"] = False
+        for assignment_id in ("Lab1", "lab1"):
+            with self.subTest(assignment=assignment_id):
+                result = review_pull_request(
+                    self.course, self.roster,
+                    self.snapshot(title=f"[2023010102刘西莹]{assignment_id}作业提交"),
+                )
+                self.assertEqual(result.reason_codes, ("ASSIGNMENT_NOT_CONFIGURED",))
+                self.assertIn("未启用", result.issues[0].message)
+                self.assertIn("联系教师", result.issues[0].message)
+                self.assertNotIn("正确标题应为", result.issues[0].message)
+
+    def test_ambiguous_case_matches_do_not_select_an_assignment(self):
+        self.course.data["assignments"]["LAB1"] = copy.deepcopy(
+            self.course.data["assignments"]["Lab1"]
+        )
+        result = review_pull_request(
+            self.course, self.roster,
+            self.snapshot(title="[2023010102刘西莹]lab1作业提交"),
+        )
+        self.assertEqual(result.reason_codes, ("ASSIGNMENT_NOT_CONFIGURED",))
+        self.assertIn("多个", result.issues[0].message)
+        self.assertNotIn("正确标题应为", result.issues[0].message)
+        self.assertNotIn("assignment_id", result.metadata)
+
+    def test_exact_disabled_assignment_takes_precedence_over_enabled_case_match(self):
+        self.course.data["assignments"]["lab1"] = {
+            **self.course.data["assignments"]["Lab1"], "enabled": False,
+        }
+        result = review_pull_request(
+            self.course, self.roster,
+            self.snapshot(title="[2023010102刘西莹]lab1作业提交"),
+        )
+        self.assertEqual(result.reason_codes, ("ASSIGNMENT_NOT_CONFIGURED",))
+        self.assertIn("`lab1` 已配置但未启用", result.issues[0].message)
+
+    def test_title_examples_do_not_offer_disabled_assignments(self):
+        self.course.data["assignments"]["Lab1"]["enabled"] = False
+        result = review_pull_request(
+            self.course, self.roster,
+            self.snapshot(title="[2023010102刘西莹]作业提交"),
+        )
+        self.assertNotIn(
+            "`[2023010102刘西莹]Lab1作业提交`", result.issues[0].message,
+        )
+        self.assertIn("`[2023010102刘西莹]Lab2作业提交`", result.issues[0].message)
+        self.course.data["assignments"]["Lab2"]["enabled"] = False
+        result = review_pull_request(
+            self.course, self.roster,
+            self.snapshot(title="[2023010102刘西莹]作业提交"),
+        )
+        self.assertIn("当前没有已启用的作业", result.issues[0].message)
+
     def test_title_cannot_impersonate_another_student(self):
         result = review_pull_request(
             self.course,
