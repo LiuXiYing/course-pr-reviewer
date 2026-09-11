@@ -14,6 +14,7 @@ from course_pr_reviewer.config import (
 from course_pr_reviewer.models import Decision, Issue, ReasonCode
 from course_pr_reviewer.path_utils import canonical_filename, resolve_filename
 from course_pr_reviewer.reviewer import review_pull_request
+from course_pr_reviewer.exceptions import ReviewSystemError
 from course_pr_reviewer.snapshot import ChangedFile, PullRequestSnapshot
 
 ROOT = Path(__file__).parents[1]
@@ -232,6 +233,49 @@ class DeterministicReviewerTests(unittest.TestCase):
     def report(self, lines, filename="2023010102刘西莹/Lab1/Lab1.md"):
         return ChangedFile(filename, "added", content="\n".join(lines))
 
+    def test_report_content_is_fetched_from_github_before_ai_review(self):
+        class FakeGitHub:
+            def __init__(self, blobs):
+                self.blobs = blobs
+                self.calls = []
+
+            def text_blob(self, repository, sha, *, max_bytes):
+                self.calls.append((repository, sha, max_bytes))
+                return self.blobs[sha]
+
+        github = FakeGitHub({"e" * 40: ""})
+        files = (
+            ChangedFile(
+                "2023010102刘西莹/Lab1/Lab1.md", "added", blob_sha="e" * 40
+            ),
+            ChangedFile("2023010102刘西莹/Lab1/result.png", "added", blob_sha="f" * 40),
+        )
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(files=files), github=github
+        )
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertIn(ReasonCode.CONTENT_TOO_SHORT, self.codes(result))
+        self.assertIn("空文件", result.issues[0].message)
+        self.assertEqual(
+            github.calls, [("teacher/course", "e" * 40, 200_000)]
+        )
+
+    def test_unfetchable_report_content_still_reaches_the_ai_stage(self):
+        class NoneGitHub:
+            def text_blob(self, repository, sha, *, max_bytes):
+                return None
+
+        files = (
+            ChangedFile("2023010102刘西莹/Lab1/Lab1.md", "added", blob_sha="e" * 40),
+            ChangedFile("2023010102刘西莹/Lab1/result.png", "added"),
+        )
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(files=files),
+            github=NoneGitHub(),
+        )
+        self.assertEqual(result.decision, Decision.PASS)
+        self.assertNotIn(ReasonCode.CONTENT_TOO_SHORT, self.codes(result))
+
     def test_empty_report_file_fails_before_ai_review(self):
         files = (
             self.report([]),
@@ -287,6 +331,23 @@ class DeterministicReviewerTests(unittest.TestCase):
             self.course, self.roster, self.snapshot(files=files)
         )
         self.assertEqual(result.decision, Decision.PASS)
+        self.assertNotIn(ReasonCode.CONTENT_TOO_SHORT, self.codes(result))
+
+    def test_oversized_report_content_is_not_downloaded_twice(self):
+        class LimitedGitHub:
+            def __init__(self):
+                self.calls = 0
+
+            def text_blob(self, repository, sha, *, max_bytes):
+                self.calls += 1
+                raise ReviewSystemError("GitHub API GET blob 返回 HTTP 413")
+
+        files = (ChangedFile("2023010102刘西莹/Lab1/Lab1.md", "added", blob_sha="e" * 40),)
+        github = LimitedGitHub()
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(files=files), github=github
+        )
+        self.assertEqual(github.calls, 1)
         self.assertNotIn(ReasonCode.CONTENT_TOO_SHORT, self.codes(result))
 
     def test_min_nonempty_lines_can_be_disabled_per_assignment(self):

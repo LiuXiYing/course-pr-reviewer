@@ -183,6 +183,7 @@ def _review(
         snapshot,
         ai_reviewer=ai_reviewer,
         vision_reviewer=vision_reviewer,
+        github=github,
     )
     # Persist the authoritative result before any optional explanation request.
     Path(result_file).write_text(result.to_json() + "\n", encoding="utf-8")

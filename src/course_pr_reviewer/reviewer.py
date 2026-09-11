@@ -5,11 +5,16 @@ from __future__ import annotations
 import datetime as dt
 import re
 import string
+from pathlib import PurePosixPath
 
 from . import __version__
-from .ai import GlmAIReviewer
+from .ai import BINARY_SUFFIXES, GlmAIReviewer
 from .config import CourseConfiguration, Student, StudentRoster
-from .exceptions import InvalidStudentImage, ReviewSystemError
+from .exceptions import (
+    ContentLimitExceeded,
+    InvalidStudentImage,
+    ReviewSystemError,
+)
 from .models import Decision, Issue, ReasonCode, ReviewResult
 from .path_utils import canonical_filename
 from .review_time import review_time_context
@@ -98,29 +103,51 @@ def _required_file_issues(assignment: dict, submitted: set[str]) -> list[Issue]:
 
 
 def _report_content_issues(
+    course: CourseConfiguration,
     assignment: dict,
     snapshot: PullRequestSnapshot,
     expected_prefix: str,
+    github,
 ) -> list[Issue]:
     minimum = assignment.get("min_nonempty_lines", 0)
     if minimum <= 0:
         return []
+    max_bytes = course.ai.get("max_file_bytes", 200_000)
     issues: list[Issue] = []
     for changed in snapshot.files:
         if changed.status == "removed" or not changed.filename.startswith(
             expected_prefix
         ):
             continue
-        if changed.content is None:
-            # Binary or unloaded files are judged by the vision stage instead.
+        content = changed.content
+        if content is None:
+            # Content is loaded lazily; fetch it here only for text files so the
+            # preflight can judge them. Binary files stay with the vision stage.
+            if (
+                github is None
+                or changed.blob_sha is None
+                or PurePosixPath(changed.filename).suffix.casefold()
+                in BINARY_SUFFIXES
+            ):
+                continue
+            try:
+                content = github.text_blob(
+                    snapshot.repository,
+                    changed.blob_sha,
+                    max_bytes=max_bytes,
+                )
+            except (ContentLimitExceeded, ReviewSystemError):
+                # Load failures are surfaced by the AI stage with proper messages.
+                continue
+        if content is None:
             continue
         nonempty_lines = sum(
-            1 for line in changed.content.splitlines() if line.strip()
+            1 for line in content.splitlines() if line.strip()
         )
         if nonempty_lines >= minimum:
             continue
         relative = changed.filename[len(expected_prefix):]
-        if not changed.content.strip():
+        if not content.strip():
             detail = (
                 f"`{relative}` 是空文件（0 字节），没有可审核的实验内容；"
                 "请确认报告已保存并完整提交。"
@@ -148,6 +175,7 @@ def review_pull_request(
     snapshot: PullRequestSnapshot,
     ai_reviewer: GlmAIReviewer | None = None,
     vision_reviewer: GlmVisionReviewer | None = None,
+    github=None,
 ) -> ReviewResult:
     metadata = {
         "course": course.name,
@@ -368,7 +396,9 @@ def review_pull_request(
             submitted.add(relative)
 
     issues.extend(_required_file_issues(assignment, submitted))
-    issues.extend(_report_content_issues(assignment, snapshot, expected_prefix))
+    issues.extend(
+        _report_content_issues(course, assignment, snapshot, expected_prefix, github)
+    )
 
     deadline = dt.datetime.fromisoformat(assignment["deadline"])
     if snapshot.event_at > deadline:
