@@ -514,6 +514,26 @@ class GlmAIReviewer:
         raw_issues = resolved_issues
         if not raw_issues and model_decision is not Decision.PASS:
             model_decision = Decision.PASS
+        # 证据无法在学生文本中复核的问题按降权处理：不作为拦截依据，
+        # 仅记录在 metadata 中供人工追溯；全部问题都无法复核时，
+        # 原有的 FAIL / MANUAL_REVIEW 结论失去依据，降为 PASS。
+        # 置信度不足的拦截仍在后续独立生效。
+        supported_issues: list[dict[str, Any]] = []
+        unsupported_evidence: list[dict[str, Any]] = []
+        for item in raw_issues:
+            path = item["file"]
+            evidence = item["evidence"]
+            if path not in content_by_file or not _evidence_is_supported(
+                evidence, content_by_file[path]
+            ):
+                unsupported_evidence.append(item)
+            else:
+                supported_issues.append(item)
+        if unsupported_evidence:
+            raw_issues = supported_issues
+            metadata = {**metadata, "unsupported_evidence": unsupported_evidence}
+            if not raw_issues and model_decision is not Decision.PASS:
+                model_decision = Decision.PASS
         if model_decision is Decision.FAIL:
             definite_issues = [
                 item for item in raw_issues if item["category"] != "UNCERTAIN"
@@ -544,31 +564,6 @@ class GlmAIReviewer:
                         code=ReasonCode.AI_UNCERTAIN,
                         message="AI 的 MANUAL_REVIEW 结果包含确定性问题，需要重新审核",
                     ),
-                ),
-                confidence=confidence,
-                metadata=metadata,
-            )
-
-        unsupported_evidence: list[dict[str, Any]] = []
-        for item in raw_issues:
-            path = item["file"]
-            evidence = item["evidence"]
-            if path not in content_by_file or not _evidence_is_supported(
-                evidence, content_by_file[path]
-            ):
-                unsupported_evidence.append(item)
-        if unsupported_evidence:
-            return AIOutcome(
-                decision=Decision.MANUAL_REVIEW,
-                summary="AI 返回的部分证据无法在学生文件中复核。",
-                issues=tuple(
-                    Issue(
-                        code=ReasonCode.AI_UNCERTAIN,
-                        message=item["message"] + "（模型证据无法在原文中复核）",
-                        file=item["file"],
-                        rule=item["rule"],
-                    )
-                    for item in unsupported_evidence
                 ),
                 confidence=confidence,
                 metadata=metadata,

@@ -124,7 +124,7 @@ ai:
   max_output_tokens: 2048
 ```
 
-每个启用 AI 审核的作业必须在 `review_points` 中配置明确的审核点。AI 返回的 `FAIL` 证据必须能在对应学生文件中逐字查到，否则自动降级为 `MANUAL_REVIEW`。低于 `min_confidence` 的结果也会阻止自动通过。
+每个启用 AI 审核的作业必须在 `review_points` 中配置明确的审核点。AI 返回的问题证据必须能在对应学生文件中逐字查到；无法复核的问题按降权处理，不作为拦截依据，仅记录在阶段元数据的 `unsupported_evidence` 中。全部问题都无法复核时，原有的 `FAIL` 或 `MANUAL_REVIEW` 结论失去依据并降为 `PASS`；低于 `min_confidence` 的结果仍会阻止自动通过。
 
 `auto_merge` 需要额外的 `merge-token` 输入：GITHUB_TOKEN 无权合并 PR，会返回 `403 Resource not accessible by integration`，必须提供一个具备仓库写权限的 PAT。未配置时合并会失败，其余审核与评论功能不受影响。
 
