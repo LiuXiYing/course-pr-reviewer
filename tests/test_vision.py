@@ -5,6 +5,7 @@ import copy
 import datetime as dt
 import json
 import unittest
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 
@@ -191,6 +192,48 @@ class GlmVisionReviewerTests(unittest.TestCase):
         self.assertEqual(
             transport.calls[0]["model"], "gemini-3.5-flash-lite"
         )
+
+    def test_vision_corrects_output_without_reloading_images_or_ocr(self):
+        issue = {
+            "category": "VISUAL_VIOLATION", "message": "截图缺少要求的结果",
+            "file": "result.png", "evidence": "", "rule": "检查运行结果",
+        }
+        transport = FakeTransport(vision_result("FAIL", issues=[issue]))
+
+        def sequence(url, headers, body, timeout):
+            if transport.calls:
+                transport.result = vision_result()
+            return transport(url, headers, body, timeout)
+
+        github = FakeGitHub(png_bytes())
+        ocr = FakeOCR()
+        reviewer = GlmVisionReviewer(
+            GlmClient("test-key", transport=sequence), github, ocr_engine=ocr,
+        )
+        with self.assertLogs("course_pr_reviewer.structured_output", level="WARNING"):
+            outcome = reviewer.review(
+                self.course, "Lab1", self.snapshot, "2023010102刘西莹/Lab1"
+            )
+        self.assertEqual(outcome.decision, Decision.PASS)
+        self.assertEqual(len(transport.calls), 2)
+        self.assertEqual(len(github.calls), 1)
+        self.assertEqual(len(ocr.calls), 1)
+        self.assertEqual(outcome.metadata["structured_output"]["corrections"], 1)
+        self.assertEqual(
+            transport.calls[0]["messages"][1], transport.calls[1]["messages"][1]
+        )
+
+    def test_vision_prompt_receives_the_same_trusted_clock_as_text_review(self):
+        snapshot = replace(
+            self.snapshot, reviewed_at=dt.datetime.fromisoformat("2026-09-11T00:00:00+00:00")
+        )
+        reviewer, transport, _ = self.reviewer(vision_result())
+        reviewer.review(self.course, "Lab1", snapshot, "2023010102刘西莹/Lab1")
+        system = transport.calls[0]["messages"][0]["content"]
+        context = json.loads(system.split("可信时间基准（由审核器提供）：\n")[1].split("\n")[0])
+        self.assertEqual(context["current_year"], 2026)
+        self.assertEqual(context["timezone"], "Asia/Shanghai")
+        self.assertEqual(context["head_pushed_at_utc"], snapshot.event_at.isoformat())
 
     def test_vision_stage_uses_vision_review_points_when_configured(self):
         data = copy.deepcopy(self.course.data)

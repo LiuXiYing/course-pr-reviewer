@@ -8,7 +8,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -38,6 +38,9 @@ class PullRequestSnapshot:
     current_head_sha: str
     event_at: dt.datetime
     files: tuple[ChangedFile, ...]
+    # Capture once for all providers, stages and corrections in this review.
+    # Never load this clock from student files or the serialized PR metadata.
+    reviewed_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.UTC))
 
 
 def _aware_datetime(value: str, field: str) -> dt.datetime:

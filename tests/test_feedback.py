@@ -237,6 +237,30 @@ class FeedbackTests(unittest.TestCase):
                 self.assertNotIn("重复", body)
         factory.assert_not_called()
 
+    def test_service_errors_explain_recovery_without_another_provider_call(self):
+        original = self.result(ReasonCode.SERVICE_ERROR, Decision.ERROR)
+        factory = Mock(side_effect=AssertionError("service feedback must not call AI"))
+        updated = add_ai_feedback(self.course, self.roster, self.snapshot, original, factory)
+        self.assert_original_preserved(original, updated)
+        self.assertEqual(updated.metadata["ai_feedback"]["source"], "rules")
+        body = render_comment(updated.to_dict())
+        self.assertIn("未安排后续自动重跑", body)
+        self.assertIn("教师", body)
+        self.assertNotIn("等待系统自动重试", body)
+        self.assertNotIn("已通知教师", body)
+        factory.assert_not_called()
+
+    def test_feedback_uses_runtime_date_and_preserves_the_original_submission_time(self):
+        snapshot = replace(
+            self.snapshot, reviewed_at=dt.datetime.fromisoformat("2026-09-11T00:00:00+00:00")
+        )
+        _, context, request = self.generate(self.result(), snapshot=snapshot)
+        self.assertEqual(context["review_time"]["current_year"], 2026)
+        self.assertEqual(context["pull_request"]["head_pushed_at"], snapshot.event_at.isoformat())
+        system = request["messages"][0]["content"]
+        trusted = json.loads(system.split("可信时间基准（由审核器提供）：\n")[1].split("\n")[0])
+        self.assertEqual(trusted, context["review_time"])
+
     def test_title_hint_remains_available_when_feedback_is_disabled(self):
         self.course.data["features"]["ai_feedback"] = False
         snapshot = replace(self.snapshot, title="[2023010102刘西莹]lab1作业提交")
@@ -270,9 +294,13 @@ class FeedbackTests(unittest.TestCase):
         self.assertTrue(context["pull_request"]["changed_files"])
 
     def test_all_non_pass_decisions_are_preserved(self):
-        for decision in (Decision.FAIL, Decision.MANUAL_REVIEW, Decision.ERROR):
+        for decision, code in (
+            (Decision.FAIL, ReasonCode.AI_REJECTED),
+            (Decision.MANUAL_REVIEW, ReasonCode.AI_UNCERTAIN),
+            (Decision.ERROR, ReasonCode.CONFIG_ERROR),
+        ):
             with self.subTest(decision=decision):
-                original = self.result(ReasonCode.SERVICE_ERROR, decision)
+                original = self.result(code, decision)
                 updated, context, _ = self.generate(original)
                 self.assertEqual(context["original_result"]["decision"], decision.value)
                 self.assert_original_preserved(original, updated)

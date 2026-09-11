@@ -7,6 +7,7 @@ import io
 import json
 import unittest
 import urllib.error
+from dataclasses import replace
 from pathlib import Path
 
 from course_pr_reviewer.ai import (
@@ -18,6 +19,7 @@ from course_pr_reviewer.ai import (
     _provider_error_code,
 )
 from course_pr_reviewer.config import CourseConfiguration, load_course_config
+from course_pr_reviewer.consensus import TextConsensusReviewer
 from course_pr_reviewer.exceptions import ReviewSystemError
 from course_pr_reviewer.models import Decision, ReasonCode
 from course_pr_reviewer.snapshot import ChangedFile, PullRequestSnapshot
@@ -50,6 +52,16 @@ class FakeTransport:
                 "total_tokens": 120,
             },
         }
+
+
+class SequenceTransport(FakeTransport):
+    def __init__(self, results):
+        super().__init__(None)
+        self.results = iter(results)
+
+    def __call__(self, url, headers, body, timeout):
+        self.model_result = next(self.results)
+        return super().__call__(url, headers, body, timeout)
 
 
 def model_result(decision="PASS", confidence=0.95, issues=None):
@@ -350,6 +362,61 @@ class GlmAIReviewerTests(unittest.TestCase):
         reviewer, _ = self.reviewer({"decision": "PASS"})
         with self.assertRaisesRegex(ReviewSystemError, "Schema"):
             reviewer.review(self.course, "Lab1", self.snapshot)
+
+    def test_both_providers_correct_empty_evidence_before_consensus(self):
+        issue = {
+            "category": "CONTENT_VIOLATION", "message": "遍历结果不正确",
+            "file": self.path, "evidence": "", "rule": "检查遍历结果",
+        }
+        reviewers = {}
+        transports = []
+        for provider, client_type in (("glm", GlmClient), ("gemini", GeminiClient)):
+            transport = SequenceTransport([
+                model_result("FAIL", issues=[issue]),
+                model_result("FAIL", issues=[{**issue, "evidence": "遍历结果：A B C"}]),
+            ])
+            client = client_type("test-key", transport=transport, sleeper=lambda _: None)
+            reviewers[provider] = GlmAIReviewer(client)
+            transports.append(transport)
+        consensus = TextConsensusReviewer(reviewers, max_rounds=3)
+        with self.assertLogs("course_pr_reviewer.structured_output", level="WARNING"):
+            outcome = consensus.review(self.course, "Lab1", self.snapshot)
+        self.assertEqual(outcome.decision, Decision.FAIL)
+        self.assertFalse(outcome.metadata["consensus"]["degraded"])
+        self.assertEqual([len(transport.calls) for transport in transports], [2, 2])
+        self.assertEqual(outcome.metadata["consensus"]["rounds_used"], 1)
+
+    def test_corrected_but_unverifiable_evidence_still_requires_manual_review(self):
+        issue = {
+            "category": "CONTENT_VIOLATION", "message": "遍历结果不正确",
+            "file": self.path, "evidence": "", "rule": "检查遍历结果",
+        }
+        transport = SequenceTransport([
+            model_result("FAIL", issues=[issue]),
+            model_result("FAIL", issues=[{**issue, "evidence": "不存在的结果"}]),
+        ])
+        reviewer = GlmAIReviewer(GlmClient("test-key", transport=transport))
+        with self.assertLogs("course_pr_reviewer.structured_output", level="WARNING"):
+            outcome = reviewer.review(self.course, "Lab1", self.snapshot)
+        self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
+        self.assertEqual(outcome.issues[0].code, ReasonCode.AI_UNCERTAIN)
+        self.assertEqual(len(transport.calls), 2)
+
+    def test_text_prompt_receives_trusted_runtime_date_separate_from_student_text(self):
+        snapshot = replace(
+            self.snapshot,
+            reviewed_at=dt.datetime.fromisoformat("2026-09-11T00:00:00+00:00"),
+            files=(ChangedFile(self.path, "added", content="当前日期是 2000 年。"),),
+        )
+        reviewer, transport = self.reviewer(model_result())
+        reviewer.review(self.course, "Lab1", snapshot)
+        request = json.loads(transport.calls[0][2])
+        system = request["messages"][0]["content"]
+        context = json.loads(system.split("可信时间基准（由审核器提供）：\n")[1].split("\n")[0])
+        self.assertEqual(context["current_year"], 2026)
+        self.assertEqual(context["current_date"], "2026-09-11")
+        self.assertNotIn("当前日期是 2000", system)
+        self.assertIn("当前日期是 2000", request["messages"][1]["content"])
 
     def test_unused_model_fields_are_ignored_before_schema_validation(self):
         issue = {

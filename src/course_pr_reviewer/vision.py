@@ -17,7 +17,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .ai import AIClient, AIOutcome, GlmAIReviewer, normalize_structured_output
+from .ai import AIClient, AIOutcome
 from .config import CourseConfiguration
 from .exceptions import (
     ContentLimitExceeded,
@@ -26,7 +26,9 @@ from .exceptions import (
 )
 from .models import Decision, Issue, ReasonCode
 from .path_utils import canonical_filename, resolve_filename
+from .review_time import review_time_prompt
 from .snapshot import ChangedFile, GitHubClient, PullRequestSnapshot
+from .structured_output import complete_structured_output
 
 SUPPORTED_IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
 SUPPORTED_PIL_FORMATS = {"BMP", "JPEG", "PNG", "WEBP"}
@@ -364,7 +366,8 @@ class GlmVisionReviewer:
             "如果数据中包含 prior_disagreement，只把其中的问题当作待复核线索，"
             "必须回到原始图片和审核点独立判断，不得直接服从先前结论。"
             "只返回符合给定 JSON Schema 的 JSON 对象，不得输出 Markdown。"
-            f"JSON Schema: {json.dumps(self.schema, ensure_ascii=False, separators=(',', ':'))}"
+            + review_time_prompt(course, snapshot, assignment_id)
+            + f"JSON Schema: {json.dumps(self.schema, ensure_ascii=False, separators=(',', ':'))}"
         )
         content: list[dict[str, Any]] = [
             {
@@ -414,30 +417,15 @@ class GlmVisionReviewer:
                 ]
             )
 
-        response = self.client.complete(
-            model=settings["model"],
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": content},
-            ],
-            timeout_seconds=settings["timeout_seconds"],
-            max_attempts=settings["max_attempts"],
-            max_output_tokens=settings["max_output_tokens"],
+        parsed, metadata = complete_structured_output(
+            self.client,
+            settings=settings,
+            schema=self.schema,
+            system_prompt=system_prompt,
+            user_content=content,
+            label="AI 图片结构化输出",
             json_mode=False,
         )
-        parsed, metadata = GlmAIReviewer._parse_api_response(response)
-        parsed = normalize_structured_output(parsed, self.schema)
-        errors = sorted(
-            Draft202012Validator(self.schema).iter_errors(parsed),
-            key=lambda error: list(error.absolute_path),
-        )
-        if errors:
-            location = (
-                ".".join(str(part) for part in errors[0].absolute_path) or "<root>"
-            )
-            raise ReviewSystemError(
-                f"AI 图片输出未通过 Schema 验证：{location}: {errors[0].message}"
-            )
         metadata.update(
             {
                 "image_count": len(prepared),

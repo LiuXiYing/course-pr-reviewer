@@ -12,6 +12,7 @@ from .config import CourseConfiguration, Student, StudentRoster
 from .exceptions import InvalidStudentImage, ReviewSystemError
 from .models import Decision, Issue, ReasonCode, ReviewResult
 from .path_utils import canonical_filename
+from .review_time import review_time_context
 from .snapshot import PullRequestSnapshot
 from .vision import GlmVisionReviewer
 
@@ -115,6 +116,7 @@ def review_pull_request(
         "pr_number": snapshot.number,
         "head_sha": snapshot.current_head_sha,
         "reviewer_version": __version__,
+        "review_time": review_time_context(course, snapshot),
     }
 
     if snapshot.captured_head_sha != snapshot.current_head_sha:
@@ -254,6 +256,7 @@ def review_pull_request(
             metadata=metadata,
         )
     metadata["assignment_id"] = assignment_id
+    metadata["review_time"] = review_time_context(course, snapshot, assignment_id)
     expected_title = course.expected_title(student, assignment_id)
     if snapshot.title != expected_title:
         return ReviewResult(

@@ -20,7 +20,7 @@
           "category": {"enum": ["CONTENT_VIOLATION", "PROMPT_INJECTION", "UNCERTAIN"]},
           "message": {"type": "string", "minLength": 1, "maxLength": 1000},
           "file": {"type": "string", "minLength": 1, "maxLength": 255},
-          "evidence": {"type": "string", "minLength": 1, "maxLength": 500},
+          "evidence": {"type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S"},
           "rule": {"type": "string", "minLength": 1, "maxLength": 1000}
         }
       }

@@ -13,6 +13,10 @@ class ReviewSystemError(ReviewerError):
     """The review could not be completed reliably."""
 
 
+class StructuredOutputError(ReviewSystemError):
+    """A model response needs regeneration before it can be evaluated."""
+
+
 class ProviderUnavailableError(ReviewSystemError):
     """A configured provider is temporarily unavailable after retries."""
 
