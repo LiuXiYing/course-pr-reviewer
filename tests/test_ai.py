@@ -157,7 +157,7 @@ class GlmAIReviewerTests(unittest.TestCase):
         outcome = reviewer.review(self.course, "Lab1", snapshot)
         self.assertEqual(outcome.issues[0].code, ReasonCode.PROMPT_INJECTION)
 
-    def test_unverifiable_evidence_is_downgraded_to_manual(self):
+    def test_unverifiable_evidence_is_downweighted_without_blocking(self):
         issue = {
             "category": "CONTENT_VIOLATION",
             "message": "结果不正确",
@@ -167,11 +167,15 @@ class GlmAIReviewerTests(unittest.TestCase):
         }
         reviewer, _ = self.reviewer(model_result("FAIL", issues=[issue]))
         outcome = reviewer.review(self.course, "Lab1", self.snapshot)
-        self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
-        self.assertEqual(outcome.issues[0].code, ReasonCode.AI_UNCERTAIN)
-        self.assertEqual(outcome.issues[0].file, self.path)
-        self.assertIn("结果不正确", outcome.issues[0].message)
-        self.assertIn("无法在原文中复核", outcome.issues[0].message)
+        self.assertEqual(outcome.decision, Decision.PASS)
+        self.assertEqual(outcome.issues, ())
+        self.assertEqual(
+            outcome.metadata["unsupported_evidence"][0]["message"], "结果不正确"
+        )
+        self.assertEqual(
+            outcome.metadata["unsupported_evidence"][0]["evidence"],
+            "文件中并不存在的证据",
+        )
 
     def test_markdown_table_evidence_allows_layout_only_differences(self):
         content = "| 虚磁盘容量 |40GB|\n"
@@ -214,8 +218,11 @@ class GlmAIReviewerTests(unittest.TestCase):
 
         outcome = reviewer.review(self.course, "Lab1", snapshot)
 
-        self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
-        self.assertIn("服务名称不正确", outcome.issues[0].message)
+        self.assertEqual(outcome.decision, Decision.PASS)
+        self.assertEqual(outcome.issues, ())
+        self.assertEqual(
+            outcome.metadata["unsupported_evidence"][0]["message"], "服务名称不正确"
+        )
 
     def test_model_filename_hyphens_resolve_to_the_submitted_text_path(self):
         actual_path = "2023010102刘西莹/Lab1/lab1‑report.md"
@@ -386,7 +393,7 @@ class GlmAIReviewerTests(unittest.TestCase):
         self.assertEqual([len(transport.calls) for transport in transports], [2, 2])
         self.assertEqual(outcome.metadata["consensus"]["rounds_used"], 1)
 
-    def test_corrected_but_unverifiable_evidence_still_requires_manual_review(self):
+    def test_corrected_but_unverifiable_evidence_is_downweighted(self):
         issue = {
             "category": "CONTENT_VIOLATION", "message": "遍历结果不正确",
             "file": self.path, "evidence": "", "rule": "检查遍历结果",
@@ -398,9 +405,52 @@ class GlmAIReviewerTests(unittest.TestCase):
         reviewer = GlmAIReviewer(GlmClient("test-key", transport=transport))
         with self.assertLogs("course_pr_reviewer.structured_output", level="WARNING"):
             outcome = reviewer.review(self.course, "Lab1", self.snapshot)
-        self.assertEqual(outcome.decision, Decision.MANUAL_REVIEW)
-        self.assertEqual(outcome.issues[0].code, ReasonCode.AI_UNCERTAIN)
+        self.assertEqual(outcome.decision, Decision.PASS)
+        self.assertEqual(outcome.issues, ())
+        self.assertEqual(
+            outcome.metadata["unsupported_evidence"][0]["evidence"], "不存在的结果"
+        )
         self.assertEqual(len(transport.calls), 2)
+
+    def test_unverifiable_manual_review_no_longer_blocks_consensus(self):
+        # 复现 PR #82：GLM 以“证据无法在原文中复核”为由返回 MANUAL_REVIEW，
+        # GEMINI 返回 PASS，旧行为下双模型 3 轮无法一致，整单被迫转人工。
+        # 降权后 GLM 的可复核问题为空并降为 PASS，与 GEMINI 一轮即达成一致。
+        issue = {
+            "category": "CONTENT_VIOLATION",
+            "message": "SSH 登录记录的用户名、主机名与后续盘点不一致",
+            "file": self.path,
+            "evidence": "yanglian@yanglian-VMware-Virtual-Platform:~$",
+            "rule": "检查登录记录",
+        }
+        reviewers = {}
+        transports = []
+        for provider, client_type, result in (
+            ("glm", GlmClient, model_result("MANUAL_REVIEW", issues=[issue])),
+            ("gemini", GeminiClient, model_result("PASS")),
+        ):
+            transport = FakeTransport(result)
+            client = client_type("test-key", transport=transport, sleeper=lambda _: None)
+            reviewers[provider] = GlmAIReviewer(client)
+            transports.append(transport)
+        consensus = TextConsensusReviewer(reviewers, max_rounds=3)
+        outcome = consensus.review(self.course, "Lab1", self.snapshot)
+        self.assertEqual(outcome.decision, Decision.PASS)
+        self.assertEqual(outcome.issues, ())
+        consensus_metadata = outcome.metadata["consensus"]
+        self.assertFalse(consensus_metadata["degraded"])
+        self.assertEqual(consensus_metadata["rounds_used"], 1)
+        self.assertEqual(
+            consensus_metadata["provider_decisions"],
+            {"glm": "PASS", "gemini": "PASS"},
+        )
+        self.assertEqual(
+            consensus_metadata["provider_metadata"]["glm"]["unsupported_evidence"][0][
+                "message"
+            ],
+            "SSH 登录记录的用户名、主机名与后续盘点不一致",
+        )
+        self.assertEqual([len(transport.calls) for transport in transports], [1, 1])
 
     def test_text_prompt_receives_trusted_runtime_date_separate_from_student_text(self):
         snapshot = replace(
