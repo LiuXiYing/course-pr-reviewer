@@ -84,30 +84,21 @@ class ConsensusTests(unittest.TestCase):
         self.assertEqual(result.decision, Decision.MANUAL_REVIEW)
         self.assertEqual(result.metadata["consensus"]["rounds_used"], 1)
 
-    def test_disagreement_can_converge_on_second_round(self):
-        glm = ScriptedReviewer(
-            outcome(Decision.PASS, "glm"), outcome(Decision.FAIL, "glm")
-        )
-        gemini = ScriptedReviewer(
-            outcome(Decision.FAIL, "gemini"), outcome(Decision.FAIL, "gemini")
-        )
-        result = self.review(glm, gemini)
-        self.assertEqual(result.decision, Decision.FAIL)
-        self.assertEqual(result.metadata["consensus"]["rounds_used"], 2)
-        self.assertIsNone(glm.calls[0])
-        self.assertEqual(glm.calls[1]["previous_round"], 1)
-
-    def test_three_round_disagreement_requires_manual_review(self):
+    def test_disagreement_is_downweighted_to_pass_in_one_round(self):
         glm = ScriptedReviewer(outcome(Decision.PASS, "glm"))
         gemini = ScriptedReviewer(outcome(Decision.FAIL, "gemini"))
         result = self.review(glm, gemini)
-        self.assertEqual(result.decision, Decision.MANUAL_REVIEW)
-        self.assertEqual(result.metadata["consensus"]["rounds_used"], 3)
-        self.assertIn("3 轮", result.issues[0].message)
-        self.assertEqual(len(glm.calls), 3)
-        self.assertEqual(len(gemini.calls), 3)
+        self.assertEqual(result.decision, Decision.PASS)
+        self.assertEqual(result.issues, ())
+        consensus = result.metadata["consensus"]
+        self.assertEqual(consensus["rounds_used"], 1)
+        self.assertEqual(
+            consensus["provider_decisions"], {"glm": "PASS", "gemini": "FAIL"}
+        )
+        self.assertEqual(len(glm.calls), 1)
+        self.assertEqual(len(gemini.calls), 1)
 
-    def test_every_mixed_decision_pair_retries_then_requires_manual_review(self):
+    def test_every_mixed_decision_pair_is_downweighted_to_pass(self):
         pairs = (
             (Decision.PASS, Decision.FAIL),
             (Decision.FAIL, Decision.PASS),
@@ -121,9 +112,13 @@ class ConsensusTests(unittest.TestCase):
                 glm = ScriptedReviewer(outcome(glm_decision, "glm"))
                 gemini = ScriptedReviewer(outcome(gemini_decision, "gemini"))
                 result = self.review(glm, gemini)
-                self.assertEqual(result.decision, Decision.MANUAL_REVIEW)
-                self.assertEqual(len(glm.calls), 3)
-                self.assertEqual(len(gemini.calls), 3)
+                self.assertEqual(result.decision, Decision.PASS)
+                self.assertEqual(result.issues, ())
+                self.assertEqual(
+                    result.metadata["consensus"]["rounds_used"], 1
+                )
+                self.assertEqual(len(glm.calls), 1)
+                self.assertEqual(len(gemini.calls), 1)
 
     def test_one_temporarily_unavailable_uses_working_result(self):
         result = self.review(
