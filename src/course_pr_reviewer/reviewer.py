@@ -97,6 +97,45 @@ def _required_file_issues(assignment: dict, submitted: set[str]) -> list[Issue]:
     return issues
 
 
+def _report_content_issues(
+    assignment: dict,
+    snapshot: PullRequestSnapshot,
+    expected_prefix: str,
+) -> list[Issue]:
+    minimum = assignment.get("min_nonempty_lines", 0)
+    if minimum <= 0:
+        return []
+    issues: list[Issue] = []
+    for changed in snapshot.files:
+        if changed.status == "removed" or not changed.filename.startswith(
+            expected_prefix
+        ):
+            continue
+        if changed.content is None:
+            # Binary or unloaded files are judged by the vision stage instead.
+            continue
+        nonempty_lines = sum(
+            1 for line in changed.content.splitlines() if line.strip()
+        )
+        if nonempty_lines >= minimum:
+            continue
+        relative = changed.filename[len(expected_prefix):]
+        if not changed.content.strip():
+            detail = (
+                f"`{relative}` 是空文件（0 字节），没有可审核的实验内容；"
+                "请确认报告已保存并完整提交。"
+            )
+        else:
+            detail = (
+                f"`{relative}` 的非空内容仅 {nonempty_lines} 行，"
+                f"少于要求的 {minimum} 行，报告明显不完整。"
+            )
+        issues.append(
+            _issue(ReasonCode.CONTENT_TOO_SHORT, detail, file=changed.filename)
+        )
+    return issues
+
+
 def _with_defaults(course: CourseConfiguration, assignment: dict) -> dict:
     merged = dict(course.data.get("defaults", {}))
     merged.update(assignment)
@@ -329,6 +368,7 @@ def review_pull_request(
             submitted.add(relative)
 
     issues.extend(_required_file_issues(assignment, submitted))
+    issues.extend(_report_content_issues(assignment, snapshot, expected_prefix))
 
     deadline = dt.datetime.fromisoformat(assignment["deadline"])
     if snapshot.event_at > deadline:

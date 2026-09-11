@@ -229,6 +229,74 @@ class DeterministicReviewerTests(unittest.TestCase):
         self.assertIn(ReasonCode.REQUIRED_FILE_MISSING, self.codes(result))
         self.assertIn(ReasonCode.EXTRA_FILE, self.codes(result))
 
+    def report(self, lines, filename="2023010102刘西莹/Lab1/Lab1.md"):
+        return ChangedFile(filename, "added", content="\n".join(lines))
+
+    def test_empty_report_file_fails_before_ai_review(self):
+        files = (
+            self.report([]),
+            ChangedFile("2023010102刘西莹/Lab1/result.png", "added"),
+        )
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(files=files)
+        )
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertIn(ReasonCode.CONTENT_TOO_SHORT, self.codes(result))
+        message = result.issues[0].message
+        self.assertIn("空文件", message)
+        self.assertIn("Lab1.md", message)
+        self.assertNotIn("SERVICE_ERROR", result.reason_codes)
+
+    def test_whitespace_only_report_counts_as_empty(self):
+        files = (self.report(["   ", "\t", "", "  "]),)
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(files=files)
+        )
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertIn(ReasonCode.CONTENT_TOO_SHORT, self.codes(result))
+
+    def test_short_report_reports_the_actual_and_required_line_counts(self):
+        files = (self.report([f"内容 {i}" for i in range(3)]),)
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(files=files)
+        )
+        self.assertEqual(result.decision, Decision.FAIL)
+        issue = next(
+            issue for issue in result.issues
+            if issue.code is ReasonCode.CONTENT_TOO_SHORT
+        )
+        self.assertIn("3 行", issue.message)
+        self.assertIn("10 行", issue.message)
+
+    def test_report_meeting_min_nonempty_lines_passes(self):
+        files = (
+            self.report([f"内容 {i}" for i in range(10)]),
+            ChangedFile("2023010102刘西莹/Lab1/result.png", "added"),
+        )
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(files=files)
+        )
+        self.assertEqual(result.decision, Decision.PASS)
+
+    def test_unloaded_file_content_is_left_to_the_vision_stage(self):
+        files = (
+            ChangedFile("2023010102刘西莹/Lab1/Lab1.md", "added"),
+            ChangedFile("2023010102刘西莹/Lab1/result.png", "added"),
+        )
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(files=files)
+        )
+        self.assertEqual(result.decision, Decision.PASS)
+        self.assertNotIn(ReasonCode.CONTENT_TOO_SHORT, self.codes(result))
+
+    def test_min_nonempty_lines_can_be_disabled_per_assignment(self):
+        self.course.data["assignments"]["Lab1"]["min_nonempty_lines"] = 0
+        files = (self.report([]),)
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(files=files)
+        )
+        self.assertNotIn(ReasonCode.CONTENT_TOO_SHORT, self.codes(result))
+
     def test_filename_hyphen_variants_match_ascii_requirements(self):
         self.course.data["assignments"]["Lab1"]["required_files"] = [
             "Lab1.md",
