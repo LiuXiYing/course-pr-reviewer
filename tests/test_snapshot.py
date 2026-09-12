@@ -47,6 +47,14 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewSystemError, "SHA"):
             snapshot_from_dict(data)
 
+    def test_optional_base_sha_must_be_an_immutable_commit(self):
+        data = valid_snapshot()
+        self.assertIsNone(snapshot_from_dict(data).base_sha)
+        for value in ("main", "../head", 123):
+            data["base_sha"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ReviewSystemError, "base SHA"):
+                snapshot_from_dict(data)
+
     def test_github_blob_is_decoded_as_utf8_text(self):
         client = GitHubClient("token")
         raw = "作业内容\n".encode()
@@ -98,6 +106,37 @@ class SnapshotTests(unittest.TestCase):
         client.get_bytes = lambda *args, **kwargs: raw
         self.assertIsNone(client.text_blob("teacher/course", "a" * 40, max_bytes=1000))
 
+    def test_template_file_reads_the_exact_base_commit_with_byte_limit(self):
+        client = GitHubClient("token")
+        with (
+            patch.object(client, "get_json", return_value={"type": "file", "sha": "d" * 40}) as metadata,
+            patch.object(client, "get_bytes", return_value="官方模板\n".encode()) as read,
+        ):
+            result = client.text_file(
+                "teacher/course", "homework/Lab2/Lab2.md", "c" * 40, max_bytes=1000
+            )
+        self.assertEqual(result, "官方模板\n")
+        metadata.assert_called_once_with(
+            "/repos/teacher/course/contents/homework/Lab2/Lab2.md?ref=" + "c" * 40
+        )
+        read.assert_called_once_with(
+            "/repos/teacher/course/git/blobs/" + "d" * 40,
+            max_bytes=1000, accept="application/vnd.github.raw+json",
+        )
+        with self.assertRaises(ReviewSystemError):
+            client.text_file("teacher/course", "../secret", "c" * 40, max_bytes=1000)
+        with self.assertRaises(ReviewSystemError):
+            client.text_file("teacher/course", "Lab2.md", "main", max_bytes=1000)
+
+    def test_template_contents_api_must_return_a_file_not_a_directory_listing(self):
+        client = GitHubClient("token")
+        for entry in ([], {"type": "dir", "sha": "d" * 40}, {"type": "file", "sha": "main"}):
+            with self.subTest(entry=entry), patch.object(client, "get_json", return_value=entry):
+                with self.assertRaisesRegex(ReviewSystemError, "普通文件"):
+                    client.text_file("teacher/course", "homework/Lab1", "c" * 40, max_bytes=1000)
+        with self.assertRaises(ReviewSystemError):
+            client.text_file("teacher/course", "homework/Lab1/", "c" * 40, max_bytes=1000)
+
     @patch("course_pr_reviewer.snapshot.GitHubClient.changed_files")
     @patch("course_pr_reviewer.snapshot.GitHubClient.pull_request")
     def test_event_metadata_is_refreshed_from_github(self, pull_request, changed_files):
@@ -105,6 +144,7 @@ class SnapshotTests(unittest.TestCase):
             "title": "[2023010102刘西莹]Lab1作业提交",
             "user": {"login": "example-user"},
             "head": {"sha": "b" * 40},
+            "base": {"sha": "c" * 40},
         }
         changed_files.return_value = [
             {"filename": "2023010102刘西莹/Lab1/Lab1.md", "status": "added"}
@@ -115,6 +155,7 @@ class SnapshotTests(unittest.TestCase):
                 "number": 7,
                 "title": "[2023010102刘西莹]Lab1作业提交",
                 "head_sha": "a" * 40,
+                "base_sha": "d" * 40,
                 "event_at": "2026-09-01T12:00:00+08:00",
             }
             (Path(directory) / "event.json").write_text(
@@ -125,6 +166,7 @@ class SnapshotTests(unittest.TestCase):
             )
         self.assertEqual(snapshot.captured_head_sha, "a" * 40)
         self.assertEqual(snapshot.current_head_sha, "b" * 40)
+        self.assertEqual(snapshot.base_sha, "c" * 40)
         pull_request.assert_called_once_with("teacher/course", 7)
 
     @patch("course_pr_reviewer.snapshot.GitHubClient.changed_files", return_value=[])

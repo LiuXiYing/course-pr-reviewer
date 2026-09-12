@@ -25,6 +25,10 @@ class ProviderConfigurationError(ReviewSystemError):
     """A provider cannot run because credentials or configuration are invalid."""
 
 
+class TemplateLoadError(ReviewSystemError):
+    """Trusted assignment context is unavailable; provider fallback is not valid."""
+
+
 class ContentLimitExceeded(ReviewerError):
     """A submission cannot be reviewed completely within configured limits."""
 

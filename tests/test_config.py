@@ -89,6 +89,37 @@ class CourseConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigurationError, "不能重复"):
                 load_course_config(path)
 
+    def test_consensus_defaults_to_three_rounds_for_dual_and_one_for_single(self):
+        data = yaml.safe_load((ROOT / "examples/course-review.yml").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "course.yml"
+            for section in ("ai", "vision"):
+                data[section].pop("consensus_rounds")
+            path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            course = load_course_config(path)
+            self.assertEqual(course.ai_consensus_rounds, 3)
+            self.assertEqual(course.vision_consensus_rounds, 3)
+            for section in ("ai", "vision"):
+                data[section].pop("providers")
+            path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            course = load_course_config(path)
+            self.assertEqual(course.ai_consensus_rounds, 1)
+            self.assertEqual(course.vision_consensus_rounds, 1)
+
+    def test_report_template_path_must_stay_in_course_repository(self):
+        data = yaml.safe_load((ROOT / "examples/course-review.yml").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "course.yml"
+            data["assignments"]["Lab1"]["report_template"] = "homework/Lab1/Lab1.md"
+            path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            self.assertEqual(load_course_config(path).assignments["Lab1"]["report_template"],
+                             "homework/Lab1/Lab1.md")
+            for unsafe in ("../secret", "/tmp/template.md", "homework/../../secret", "homework/Lab1/"):
+                data["assignments"]["Lab1"]["report_template"] = unsafe
+                path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+                with self.subTest(path=unsafe), self.assertRaisesRegex(ConfigurationError, "不安全报告模板"):
+                    load_course_config(path)
+
     def test_consensus_rounds_requires_two_providers(self):
         data = yaml.safe_load(
             (ROOT / "examples/course-review.yml").read_text(encoding="utf-8")

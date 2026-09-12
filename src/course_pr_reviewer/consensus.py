@@ -1,4 +1,4 @@
-"""Dual-provider consensus review; disagreement is downweighted to pass."""
+"""Bounded dual-provider reconsideration with a final disagreement pass."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from typing import Any, Callable
 
 from .ai import AIOutcome
 from .config import CourseConfiguration
-from .exceptions import ProviderConfigurationError, ReviewSystemError
+from .exceptions import ProviderConfigurationError, ReviewSystemError, TemplateLoadError
 from .models import Decision, Issue, ReasonCode
 from .snapshot import PullRequestSnapshot
 
 
-ReviewCall = Callable[[], AIOutcome]
+ReviewCall = Callable[[dict[str, Any] | None], AIOutcome]
 
 
 def _deduplicate_issues(outcomes: list[AIOutcome]) -> tuple[Issue, ...]:
@@ -57,7 +57,6 @@ class _ConsensusReviewer:
             raise ValueError("max_rounds must be between 1 and 3")
         self.reviewers = reviewers
         self.stage = stage
-        # 保留配置兼容：分歧不再触发多轮复核，max_rounds 仅用于元数据展示。
         self.max_rounds = max_rounds
 
     def _calls(
@@ -72,21 +71,47 @@ class _ConsensusReviewer:
     @staticmethod
     def _run_round(
         calls: dict[str, ReviewCall],
+        reconsideration: dict[str, Any] | None,
     ) -> tuple[dict[str, AIOutcome], dict[str, str]]:
         outcomes: dict[str, AIOutcome] = {}
         unavailable: dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=len(calls)) as executor:
             futures = {
-                provider: executor.submit(call) for provider, call in calls.items()
+                provider: executor.submit(call, reconsideration)
+                for provider, call in calls.items()
             }
             for provider, future in futures.items():
                 try:
                     outcomes[provider] = future.result()
-                except ProviderConfigurationError:
+                except (ProviderConfigurationError, TemplateLoadError):
                     raise
                 except ReviewSystemError as exc:
                     unavailable[provider] = str(exc)
         return outcomes, unavailable
+
+    @staticmethod
+    def _findings(outcomes: dict[str, AIOutcome]) -> dict[str, dict[str, Any]]:
+        return {
+            provider: {
+                "decision": outcome.decision.value,
+                "summary": outcome.summary,
+                "confidence": outcome.confidence,
+                "issues": [issue.to_dict() for issue in outcome.issues],
+            }
+            for provider, outcome in outcomes.items()
+        }
+
+    @classmethod
+    def _reconsideration(
+        cls, round_number: int, outcomes: dict[str, AIOutcome]
+    ) -> dict[str, Any]:
+        return {
+            "previous_round": round_number,
+            "findings": [
+                {"reviewer": f"reviewer_{index}", **finding}
+                for index, finding in enumerate(cls._findings(outcomes).values(), 1)
+            ],
+        }
 
     def _metadata(
         self,
@@ -96,6 +121,7 @@ class _ConsensusReviewer:
         unavailable: dict[str, str],
         history: list[dict[str, Any]],
         degraded: bool,
+        disagreement_pass: bool = False,
     ) -> dict[str, Any]:
         return {
             "consensus": {
@@ -103,6 +129,7 @@ class _ConsensusReviewer:
                 "rounds_used": rounds_used,
                 "max_rounds": self.max_rounds,
                 "degraded": degraded,
+                "disagreement_pass": disagreement_pass,
                 "provider_decisions": {
                     provider: outcome.decision.value
                     for provider, outcome in outcomes.items()
@@ -127,76 +154,80 @@ class _ConsensusReviewer:
         *extra: str,
     ) -> AIOutcome:
         calls = self._calls(course, assignment_id, snapshot, *extra)
-        outcomes, unavailable = self._run_round(calls)
-        history = [
-            {
-                "round": 1,
-                "decisions": {
-                    provider: outcome.decision.value
-                    for provider, outcome in outcomes.items()
-                },
-                "unavailable_providers": sorted(unavailable),
-                "provider_errors": {
-                    provider: unavailable[provider] for provider in sorted(unavailable)
-                },
-            }
-        ]
-        if not outcomes:
-            details = "；".join(
-                f"{provider}: {message}" for provider, message in unavailable.items()
+        history: list[dict[str, Any]] = []
+        reconsideration: dict[str, Any] | None = None
+        for round_number in range(1, self.max_rounds + 1):
+            outcomes, unavailable = self._run_round(calls, reconsideration)
+            history.append(
+                {
+                    "round": round_number,
+                    "decisions": {
+                        provider: outcome.decision.value
+                        for provider, outcome in outcomes.items()
+                    },
+                    "findings": self._findings(outcomes),
+                    "unavailable_providers": sorted(unavailable),
+                    "provider_errors": {
+                        provider: unavailable[provider]
+                        for provider in sorted(unavailable)
+                    },
+                }
             )
-            raise ReviewSystemError(
-                f"{self.stage}的两个审核通道均不可用，已暂停合并：{details}"
-            )
-        merged = list(outcomes.values())
-        rounds_used = 1
-        if len(outcomes) == 1:
-            provider, outcome = next(iter(outcomes.items()))
-            metadata = self._metadata(
-                rounds_used=rounds_used,
-                outcomes=outcomes,
-                unavailable=unavailable,
-                history=history,
-                degraded=True,
-            )
-            return AIOutcome(
-                decision=outcome.decision,
-                summary=(
-                    f"{self.stage}采用降级审核：仅 {provider.upper()} 可用。"
-                    f"{outcome.summary}"
-                ),
-                issues=outcome.issues,
-                confidence=outcome.confidence,
-                metadata=metadata,
-            )
-
-        provider_names = " 与 ".join(provider.upper() for provider in outcomes)
-        decisions = {outcome.decision for outcome in outcomes.values()}
-        if len(decisions) == 1:
-            decision = next(iter(decisions))
-            summaries = {
-                Decision.PASS: f"{provider_names} 均认为{self.stage}可以通过。",
-                Decision.FAIL: f"{provider_names} 均认为{self.stage}不能通过。",
-                Decision.MANUAL_REVIEW: (
-                    f"{provider_names} 均无法自动确认{self.stage}，需要人工审核。"
-                ),
-            }
-            return AIOutcome(
-                decision=decision,
-                summary=summaries[decision],
-                issues=() if decision is Decision.PASS else _deduplicate_issues(merged),
-                confidence=_minimum_confidence(merged),
-                metadata=self._metadata(
-                    rounds_used=rounds_used,
+            if not outcomes:
+                details = "；".join(
+                    f"{provider}: {message}" for provider, message in unavailable.items()
+                )
+                raise ReviewSystemError(
+                    f"{self.stage}的两个审核通道均不可用，已暂停合并：{details}"
+                )
+            if len(outcomes) == 1:
+                provider, outcome = next(iter(outcomes.items()))
+                metadata = self._metadata(
+                    rounds_used=round_number,
                     outcomes=outcomes,
                     unavailable=unavailable,
                     history=history,
-                    degraded=False,
-                ),
-            )
+                    degraded=True,
+                )
+                return AIOutcome(
+                    decision=outcome.decision,
+                    summary=(
+                        f"{self.stage}采用降级审核：仅 {provider.upper()} 可用。"
+                        f"{outcome.summary}"
+                    ),
+                    issues=outcome.issues,
+                    confidence=outcome.confidence,
+                    metadata=metadata,
+                )
 
-        # 分歧按课程配置降权处理：不再多轮复核或转人工，直接视为通过。
-        # 各自的结论与理由保留在 consensus 元数据中供人工追溯。
+            merged = list(outcomes.values())
+            provider_names = " 与 ".join(provider.upper() for provider in outcomes)
+            decisions = {outcome.decision for outcome in outcomes.values()}
+            if len(decisions) == 1:
+                decision = next(iter(decisions))
+                summaries = {
+                    Decision.PASS: f"{provider_names} 均认为{self.stage}可以通过。",
+                    Decision.FAIL: f"{provider_names} 均认为{self.stage}不能通过。",
+                    Decision.MANUAL_REVIEW: (
+                        f"{provider_names} 均无法自动确认{self.stage}，需要人工审核。"
+                    ),
+                }
+                return AIOutcome(
+                    decision=decision,
+                    summary=summaries[decision],
+                    issues=() if decision is Decision.PASS else _deduplicate_issues(merged),
+                    confidence=_minimum_confidence(merged),
+                    metadata=self._metadata(
+                        rounds_used=round_number,
+                        outcomes=outcomes,
+                        unavailable=unavailable,
+                        history=history,
+                        degraded=False,
+                    ),
+                )
+            reconsideration = self._reconsideration(round_number, outcomes)
+
+        # 只有达到复核上限且双方仍不一致时才放行，完整理由保留在 history。
         detail = "；".join(
             f"{provider.upper()}={outcome.decision.value}"
             for provider, outcome in outcomes.items()
@@ -204,17 +235,18 @@ class _ConsensusReviewer:
         return AIOutcome(
             decision=Decision.PASS,
             summary=(
-                f"{provider_names} 意见不一致（{detail}），"
-                f"{self.stage}按配置视为通过。"
+                f"{self.stage}经过 {self.max_rounds} 轮复核仍有分歧（{detail}），"
+                "已达到复核上限，按规则视为通过。"
             ),
             issues=(),
             confidence=_minimum_confidence(merged),
             metadata=self._metadata(
-                rounds_used=rounds_used,
+                rounds_used=self.max_rounds,
                 outcomes=outcomes,
                 unavailable=unavailable,
                 history=history,
                 degraded=False,
+                disagreement_pass=True,
             ),
         )
 
@@ -232,10 +264,11 @@ class TextConsensusReviewer(_ConsensusReviewer):
     ) -> dict[str, ReviewCall]:
         return {
             provider: (
-                lambda reviewer=reviewer: reviewer.review(
+                lambda context, reviewer=reviewer: reviewer.review(
                     course,
                     assignment_id,
                     snapshot,
+                    reconsideration=context,
                 )
             )
             for provider, reviewer in self.reviewers.items()
@@ -258,11 +291,12 @@ class VisionConsensusReviewer(_ConsensusReviewer):
         submission_dir = extra[0]
         return {
             provider: (
-                lambda reviewer=reviewer: reviewer.review(
+                lambda context, reviewer=reviewer: reviewer.review(
                     course,
                     assignment_id,
                     snapshot,
                     submission_dir,
+                    reconsideration=context,
                 )
             )
             for provider, reviewer in self.reviewers.items()

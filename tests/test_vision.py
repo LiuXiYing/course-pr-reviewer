@@ -165,6 +165,10 @@ class GlmVisionReviewerTests(unittest.TestCase):
             "黄色警告或普通提示本身不构成违规",
             request["messages"][0]["content"],
         )
+        self.assertIn(
+            "不能因为学生实际值与示例不同而判错",
+            request["messages"][0]["content"],
+        )
         user_content = request["messages"][1]["content"]
         payload = json.loads(user_content[0]["text"].split("\n", 1)[1])
         self.assertEqual(payload["images"][0]["file"], "result.png")

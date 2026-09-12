@@ -393,6 +393,21 @@ class PublisherTests(unittest.TestCase):
         )
         self.assertIn("已通过邮件发送给任课教师", body)
 
+    def test_comment_distinguishes_exhausted_disagreement_from_early_agreement(self):
+        body = render_comment(result_dict(metadata={
+            "ai_consensus": {
+                "rounds_used": 3, "max_rounds": 3, "disagreement_pass": True,
+                "provider_decisions": {"glm": "FAIL", "gemini": "PASS"},
+            },
+            "vision_consensus": {
+                "rounds_used": 1, "max_rounds": 3, "disagreement_pass": False,
+                "provider_decisions": {"glm": "PASS", "gemini": "PASS"},
+            },
+        }))
+        self.assertIn("已审核 3 轮，最多 3 轮", body)
+        self.assertIn("已审核 1 轮，最多 3 轮", body)
+        self.assertEqual(body.count("达到复核上限仍有分歧，按规则通过"), 1)
+
     def test_comment_does_not_claim_email_when_sending_failed(self):
         body = render_comment(
             result_dict(

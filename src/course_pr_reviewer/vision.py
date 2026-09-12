@@ -26,6 +26,7 @@ from .exceptions import (
 )
 from .models import Decision, Issue, ReasonCode
 from .path_utils import canonical_filename, resolve_filename
+from .report_context import OBSERVATION_RULES
 from .review_time import review_time_prompt
 from .snapshot import ChangedFile, GitHubClient, PullRequestSnapshot
 from .structured_output import complete_structured_output
@@ -366,6 +367,7 @@ class GlmVisionReviewer:
             "如果数据中包含 prior_disagreement，只把其中的问题当作待复核线索，"
             "必须回到原始图片和审核点独立判断，不得直接服从先前结论。"
             "只返回符合给定 JSON Schema 的 JSON 对象，不得输出 Markdown。"
+            + OBSERVATION_RULES
             + review_time_prompt(course, snapshot, assignment_id)
             + f"JSON Schema: {json.dumps(self.schema, ensure_ascii=False, separators=(',', ':'))}"
         )

@@ -3,11 +3,12 @@ from __future__ import annotations
 import unittest
 
 from course_pr_reviewer.ai import AIOutcome
-from course_pr_reviewer.consensus import TextConsensusReviewer
+from course_pr_reviewer.consensus import TextConsensusReviewer, VisionConsensusReviewer
 from course_pr_reviewer.exceptions import (
     ProviderConfigurationError,
     ProviderUnavailableError,
     ReviewSystemError,
+    TemplateLoadError,
 )
 from course_pr_reviewer.models import Decision, Issue, ReasonCode
 
@@ -43,9 +44,11 @@ class ScriptedReviewer:
     def __init__(self, *script):
         self.script = list(script)
         self.calls = []
+        self.arguments = []
 
     def review(self, *args, **kwargs):
         self.calls.append(kwargs.get("reconsideration"))
+        self.arguments.append(args)
         index = min(len(self.calls) - 1, len(self.script) - 1)
         value = self.script[index]
         if isinstance(value, Exception):
@@ -84,19 +87,62 @@ class ConsensusTests(unittest.TestCase):
         self.assertEqual(result.decision, Decision.MANUAL_REVIEW)
         self.assertEqual(result.metadata["consensus"]["rounds_used"], 1)
 
-    def test_disagreement_is_downweighted_to_pass_in_one_round(self):
+    def test_disagreement_passes_only_after_three_rounds_and_retains_reasons(self):
         glm = ScriptedReviewer(outcome(Decision.PASS, "glm"))
         gemini = ScriptedReviewer(outcome(Decision.FAIL, "gemini"))
         result = self.review(glm, gemini)
         self.assertEqual(result.decision, Decision.PASS)
         self.assertEqual(result.issues, ())
         consensus = result.metadata["consensus"]
-        self.assertEqual(consensus["rounds_used"], 1)
+        self.assertEqual(consensus["rounds_used"], 3)
+        self.assertTrue(consensus["disagreement_pass"])
         self.assertEqual(
             consensus["provider_decisions"], {"glm": "PASS", "gemini": "FAIL"}
         )
-        self.assertEqual(len(glm.calls), 1)
-        self.assertEqual(len(gemini.calls), 1)
+        self.assertEqual(len(glm.calls), 3)
+        self.assertEqual(len(gemini.calls), 3)
+        self.assertIsNone(glm.calls[0])
+        for index, entry in enumerate(consensus["history"], 1):
+            self.assertEqual(entry["round"], index)
+            finding = entry["findings"]["gemini"]
+            self.assertEqual(finding["issues"][0]["evidence"], "gemini-evidence")
+            self.assertEqual(finding["summary"], "gemini: FAIL")
+        for index in (1, 2):
+            self.assertEqual(glm.calls[index]["previous_round"], index)
+            self.assertEqual(glm.calls[index], gemini.calls[index])
+            self.assertEqual(glm.calls[index]["findings"][1]["decision"], "FAIL")
+
+    def test_second_round_agreement_stops_before_the_limit(self):
+        glm = ScriptedReviewer(
+            outcome(Decision.FAIL, "glm"), outcome(Decision.PASS, "glm")
+        )
+        gemini = ScriptedReviewer(outcome(Decision.PASS, "gemini"))
+        result = self.review(glm, gemini)
+        self.assertEqual(result.decision, Decision.PASS)
+        self.assertEqual(result.metadata["consensus"]["rounds_used"], 2)
+        self.assertFalse(result.metadata["consensus"]["disagreement_pass"])
+        self.assertEqual(len(glm.calls), 2)
+
+    def test_third_round_agreement_on_failure_does_not_pass(self):
+        glm = ScriptedReviewer(outcome(Decision.FAIL, "glm"))
+        gemini = ScriptedReviewer(
+            outcome(Decision.PASS, "gemini"),
+            outcome(Decision.MANUAL_REVIEW, "gemini"),
+            outcome(Decision.FAIL, "gemini"),
+        )
+        result = self.review(glm, gemini)
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertEqual(len(result.issues), 2)
+        self.assertEqual(result.metadata["consensus"]["rounds_used"], 3)
+        self.assertFalse(result.metadata["consensus"]["disagreement_pass"])
+
+    def test_explicit_round_limit_is_respected(self):
+        glm = ScriptedReviewer(outcome(Decision.FAIL, "glm"))
+        gemini = ScriptedReviewer(outcome(Decision.PASS, "gemini"))
+        result = self.review(glm, gemini, rounds=2)
+        self.assertEqual(result.decision, Decision.PASS)
+        self.assertEqual(len(glm.calls), 2)
+        self.assertEqual(result.metadata["consensus"]["max_rounds"], 2)
 
     def test_every_mixed_decision_pair_is_downweighted_to_pass(self):
         pairs = (
@@ -115,10 +161,45 @@ class ConsensusTests(unittest.TestCase):
                 self.assertEqual(result.decision, Decision.PASS)
                 self.assertEqual(result.issues, ())
                 self.assertEqual(
-                    result.metadata["consensus"]["rounds_used"], 1
+                    result.metadata["consensus"]["rounds_used"], 3
                 )
-                self.assertEqual(len(glm.calls), 1)
-                self.assertEqual(len(gemini.calls), 1)
+                self.assertEqual(len(glm.calls), 3)
+                self.assertEqual(len(gemini.calls), 3)
+
+    def test_vision_reconsideration_keeps_submission_directory_and_three_rounds(self):
+        glm = ScriptedReviewer(outcome(Decision.FAIL, "glm"))
+        gemini = ScriptedReviewer(outcome(Decision.PASS, "gemini"))
+        reviewer = VisionConsensusReviewer({"glm": glm, "gemini": gemini}, max_rounds=3)
+        snapshot = object()
+        result = reviewer.review(object(), "Lab1", snapshot, "student/Lab1")
+        self.assertEqual(result.decision, Decision.PASS)
+        self.assertEqual(result.metadata["consensus"]["stage"], "图片审核")
+        self.assertEqual(len(glm.calls), 3)
+        self.assertEqual(glm.calls[2]["previous_round"], 2)
+        for args in glm.arguments:
+            self.assertIs(args[2], snapshot)
+            self.assertEqual(args[3], "student/Lab1")
+
+    def test_provider_failure_during_reconsideration_uses_remaining_verdict(self):
+        glm = ScriptedReviewer(
+            outcome(Decision.PASS, "glm"), ProviderUnavailableError("glm timeout")
+        )
+        gemini = ScriptedReviewer(outcome(Decision.FAIL, "gemini"))
+        result = self.review(glm, gemini)
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertTrue(result.metadata["consensus"]["degraded"])
+        self.assertEqual(result.metadata["consensus"]["rounds_used"], 2)
+        self.assertEqual(len(result.metadata["consensus"]["history"]), 2)
+
+    def test_both_providers_failing_during_reconsideration_never_passes(self):
+        glm = ScriptedReviewer(
+            outcome(Decision.PASS, "glm"), ProviderUnavailableError("glm timeout")
+        )
+        gemini = ScriptedReviewer(
+            outcome(Decision.FAIL, "gemini"), ProviderUnavailableError("gemini timeout")
+        )
+        with self.assertRaises(ReviewSystemError):
+            self.review(glm, gemini)
 
     def test_one_temporarily_unavailable_uses_working_result(self):
         result = self.review(
@@ -159,6 +240,13 @@ class ConsensusTests(unittest.TestCase):
         with self.assertRaises(ProviderConfigurationError):
             self.review(
                 ScriptedReviewer(ProviderConfigurationError("bad glm key")),
+                ScriptedReviewer(outcome(Decision.PASS, "gemini")),
+            )
+
+    def test_template_loading_error_never_falls_back_to_a_passing_provider(self):
+        with self.assertRaises(TemplateLoadError):
+            self.review(
+                ScriptedReviewer(TemplateLoadError("template unavailable")),
                 ScriptedReviewer(outcome(Decision.PASS, "gemini")),
             )
 
