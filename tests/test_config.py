@@ -114,7 +114,7 @@ class CourseConfigurationTests(unittest.TestCase):
             path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
             self.assertEqual(load_course_config(path).assignments["Lab1"]["report_template"],
                              "homework/Lab1/Lab1.md")
-            for unsafe in ("../secret", "/tmp/template.md", "homework/../../secret"):
+            for unsafe in ("../secret", "/tmp/template.md", "homework/../../secret", "homework/Lab1/"):
                 data["assignments"]["Lab1"]["report_template"] = unsafe
                 path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
                 with self.subTest(path=unsafe), self.assertRaisesRegex(ConfigurationError, "不安全报告模板"):

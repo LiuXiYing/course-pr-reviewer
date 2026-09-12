@@ -21,6 +21,7 @@ from .exceptions import (
     ProviderConfigurationError,
     ProviderUnavailableError,
     ReviewSystemError,
+    TemplateLoadError,
 )
 from .models import Decision, Issue, ReasonCode
 from .path_utils import resolve_filename
@@ -444,18 +445,21 @@ class GlmAIReviewer:
                 for path, content in content_by_file.items()
             ], None
         if self.github is None or snapshot.base_sha is None:
-            raise ReviewSystemError("配置了官方模板，但缺少 GitHub 客户端或基础分支 SHA")
+            raise TemplateLoadError("配置了官方模板，但缺少 GitHub 客户端或基础分支 SHA")
         key = (
             snapshot.repository, snapshot.base_sha, template_path,
             settings["max_file_bytes"],
         )
         if key not in self._templates:
-            template = self.github.text_file(
-                snapshot.repository, template_path, snapshot.base_sha,
-                max_bytes=settings["max_file_bytes"],
-            )
+            try:
+                template = self.github.text_file(
+                    snapshot.repository, template_path, snapshot.base_sha,
+                    max_bytes=settings["max_file_bytes"],
+                )
+            except (ReviewSystemError, ContentLimitExceeded) as exc:
+                raise TemplateLoadError(f"无法读取官方报告模板：{exc}") from exc
             if template is None or not template.strip():
-                raise ReviewSystemError("官方报告模板必须是非空 UTF-8 文本")
+                raise TemplateLoadError("官方报告模板必须是非空 UTF-8 文本")
             self._templates[key] = template
         template = self._templates[key]
         return [
@@ -495,7 +499,7 @@ class GlmAIReviewer:
         except ContentLimitExceeded as exc:
             return AIOutcome(
                 decision=Decision.MANUAL_REVIEW,
-                summary="官方报告模板超过自动 AI 审核限制。",
+                summary="报告与官方模板的对照超过自动审核限制。",
                 issues=(Issue(code=ReasonCode.AI_UNCERTAIN, message=str(exc)),),
             )
         submission = {
@@ -545,7 +549,9 @@ class GlmAIReviewer:
         )
         if template_reference:
             response_metadata["report_template"] = template_reference
-        return self._outcome(parsed, content_by_file, response_metadata, settings)
+        return self._outcome(
+            parsed, content_by_file, response_metadata, settings, review_files=review_files
+        )
 
     @staticmethod
     def _outcome(
@@ -553,6 +559,8 @@ class GlmAIReviewer:
         content_by_file: dict[str, str],
         metadata: dict[str, Any],
         settings: dict[str, Any],
+        *,
+        review_files: list[dict[str, Any]] | None = None,
     ) -> AIOutcome:
         model_decision = Decision(parsed["decision"])
         confidence = float(parsed["confidence"])
@@ -588,6 +596,28 @@ class GlmAIReviewer:
             raw_issues = supported_issues
             metadata = {**metadata, "unsupported_evidence": unsupported_evidence}
             if not raw_issues and model_decision is not Decision.PASS:
+                model_decision = Decision.PASS
+        segments_by_file = {
+            item["path"]: item["segments"]
+            for item in review_files or [] if "segments" in item
+        }
+        example_issues: list[dict[str, Any]] = []
+        retained_issues: list[dict[str, Any]] = []
+        for item in raw_issues:
+            segments = segments_by_file.get(item["file"], [])
+            evidence = item["evidence"]
+            only_example = any(
+                part.get("is_example") and _evidence_is_supported(evidence, part["content"])
+                for part in segments
+            ) and not any(
+                not part.get("is_example") and _evidence_is_supported(evidence, part["content"])
+                for part in segments
+            )
+            (example_issues if only_example else retained_issues).append(item)
+        if example_issues:
+            metadata = {**metadata, "template_example_issues": example_issues}
+            raw_issues = retained_issues
+            if not raw_issues:
                 model_decision = Decision.PASS
         if model_decision is Decision.FAIL:
             definite_issues = [

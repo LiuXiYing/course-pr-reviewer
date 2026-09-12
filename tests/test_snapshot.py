@@ -108,19 +108,34 @@ class SnapshotTests(unittest.TestCase):
 
     def test_template_file_reads_the_exact_base_commit_with_byte_limit(self):
         client = GitHubClient("token")
-        with patch.object(client, "get_bytes", return_value="官方模板\n".encode()) as read:
+        with (
+            patch.object(client, "get_json", return_value={"type": "file", "sha": "d" * 40}) as metadata,
+            patch.object(client, "get_bytes", return_value="官方模板\n".encode()) as read,
+        ):
             result = client.text_file(
                 "teacher/course", "homework/Lab2/Lab2.md", "c" * 40, max_bytes=1000
             )
         self.assertEqual(result, "官方模板\n")
+        metadata.assert_called_once_with(
+            "/repos/teacher/course/contents/homework/Lab2/Lab2.md?ref=" + "c" * 40
+        )
         read.assert_called_once_with(
-            "/repos/teacher/course/contents/homework/Lab2/Lab2.md?ref=" + "c" * 40,
+            "/repos/teacher/course/git/blobs/" + "d" * 40,
             max_bytes=1000, accept="application/vnd.github.raw+json",
         )
         with self.assertRaises(ReviewSystemError):
             client.text_file("teacher/course", "../secret", "c" * 40, max_bytes=1000)
         with self.assertRaises(ReviewSystemError):
             client.text_file("teacher/course", "Lab2.md", "main", max_bytes=1000)
+
+    def test_template_contents_api_must_return_a_file_not_a_directory_listing(self):
+        client = GitHubClient("token")
+        for entry in ([], {"type": "dir", "sha": "d" * 40}, {"type": "file", "sha": "main"}):
+            with self.subTest(entry=entry), patch.object(client, "get_json", return_value=entry):
+                with self.assertRaisesRegex(ReviewSystemError, "普通文件"):
+                    client.text_file("teacher/course", "homework/Lab1", "c" * 40, max_bytes=1000)
+        with self.assertRaises(ReviewSystemError):
+            client.text_file("teacher/course", "homework/Lab1/", "c" * 40, max_bytes=1000)
 
     @patch("course_pr_reviewer.snapshot.GitHubClient.changed_files")
     @patch("course_pr_reviewer.snapshot.GitHubClient.pull_request")

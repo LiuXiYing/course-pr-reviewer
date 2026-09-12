@@ -8,6 +8,7 @@ from course_pr_reviewer.exceptions import (
     ProviderConfigurationError,
     ProviderUnavailableError,
     ReviewSystemError,
+    TemplateLoadError,
 )
 from course_pr_reviewer.models import Decision, Issue, ReasonCode
 
@@ -239,6 +240,13 @@ class ConsensusTests(unittest.TestCase):
         with self.assertRaises(ProviderConfigurationError):
             self.review(
                 ScriptedReviewer(ProviderConfigurationError("bad glm key")),
+                ScriptedReviewer(outcome(Decision.PASS, "gemini")),
+            )
+
+    def test_template_loading_error_never_falls_back_to_a_passing_provider(self):
+        with self.assertRaises(TemplateLoadError):
+            self.review(
+                ScriptedReviewer(TemplateLoadError("template unavailable")),
                 ScriptedReviewer(outcome(Decision.PASS, "gemini")),
             )
 

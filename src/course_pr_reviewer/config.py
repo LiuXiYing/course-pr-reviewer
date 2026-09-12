@@ -334,7 +334,9 @@ def load_course_config(path: str | Path) -> CourseConfiguration:
                     f"{assignment_id} 包含不安全图片模式：{pattern}"
                 )
         template = assignment.get("report_template")
-        if template is not None and not _safe_relative_path(template):
+        if template is not None and (
+            not _safe_relative_path(template) or template.endswith("/")
+        ):
             raise ConfigurationError(f"{assignment_id} 包含不安全报告模板路径：{template}")
     course = CourseConfiguration(data)
     for section_name, providers in (

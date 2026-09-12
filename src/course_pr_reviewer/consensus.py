@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from .ai import AIOutcome
 from .config import CourseConfiguration
-from .exceptions import ProviderConfigurationError, ReviewSystemError
+from .exceptions import ProviderConfigurationError, ReviewSystemError, TemplateLoadError
 from .models import Decision, Issue, ReasonCode
 from .snapshot import PullRequestSnapshot
 
@@ -83,7 +83,7 @@ class _ConsensusReviewer:
             for provider, future in futures.items():
                 try:
                     outcomes[provider] = future.result()
-                except ProviderConfigurationError:
+                except (ProviderConfigurationError, TemplateLoadError):
                     raise
                 except ReviewSystemError as exc:
                     unavailable[provider] = str(exc)

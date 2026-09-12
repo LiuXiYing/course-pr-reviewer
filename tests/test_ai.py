@@ -21,7 +21,7 @@ from course_pr_reviewer.ai import (
 )
 from course_pr_reviewer.config import CourseConfiguration, load_course_config
 from course_pr_reviewer.consensus import TextConsensusReviewer
-from course_pr_reviewer.exceptions import ContentLimitExceeded, ReviewSystemError
+from course_pr_reviewer.exceptions import ContentLimitExceeded, ReviewSystemError, TemplateLoadError
 from course_pr_reviewer.models import Decision, ReasonCode
 from course_pr_reviewer.snapshot import ChangedFile, GitHubClient, PullRequestSnapshot
 
@@ -198,9 +198,51 @@ class GlmAIReviewerTests(unittest.TestCase):
         self.assertEqual(transport.calls, [])
 
         github.text_file.side_effect = ContentLimitExceeded("template too large")
-        result = reviewer.review(self.course, "Lab1", snapshot)
-        self.assertEqual(result.decision, Decision.MANUAL_REVIEW)
+        with self.assertRaisesRegex(TemplateLoadError, "template too large"):
+            reviewer.review(self.course, "Lab1", snapshot)
         self.assertEqual(transport.calls, [])
+
+    def test_copied_example_alone_cannot_reject_but_missing_answers_still_can(self):
+        template = "# Lab1\n示例：ssh student@192.168.80.128\n> 记录：IP 为 ______。\n"
+        self.course.data["assignments"]["Lab1"]["report_template"] = "homework/Lab1/Lab1.md"
+        github = Mock(spec=GitHubClient)
+        github.text_file.return_value = template
+        example_issue = {"category": "CONTENT_VIOLATION", "file": self.path,
+                         "message": "学生 IP 必须与示例一致", "evidence": "ssh student@192.168.80.128",
+                         "rule": "记录实际私有 IPv4"}
+        missing_issue = {"category": "CONTENT_VIOLATION", "file": self.path,
+                         "message": "实际 IP 未填写", "evidence": "> 记录：IP 为 ______。",
+                         "rule": "记录实际私有 IPv4"}
+        for issues, expected in (([example_issue], Decision.PASS),
+                                 ([example_issue, missing_issue], Decision.FAIL)):
+            with self.subTest(expected=expected):
+                transport = FakeTransport(model_result("FAIL", issues=issues))
+                reviewer = GlmAIReviewer(GlmClient("test-key", transport=transport), github)
+                content = template if len(issues) == 2 else template.replace("______", "192.168.225.128")
+                snapshot = replace(self.snapshot, base_sha="c" * 40,
+                                   files=(ChangedFile(self.path, "added", content=content),))
+                result = reviewer.review(self.course, "Lab1", snapshot)
+                self.assertEqual(result.decision, expected)
+                self.assertEqual(result.metadata["template_example_issues"], [example_issue])
+                if expected is Decision.FAIL:
+                    self.assertEqual(len(result.issues), 1)
+                    self.assertEqual(result.issues[0].evidence, missing_issue["evidence"])
+
+    def test_actual_answer_equal_to_example_is_still_valid_evidence(self):
+        template = "示例 IP：192.168.80.128\n> 记录：IP 为 ______。\n"
+        self.course.data["assignments"]["Lab1"]["report_template"] = "homework/Lab1/Lab1.md"
+        github = Mock(spec=GitHubClient)
+        github.text_file.return_value = template
+        issue = {"category": "CONTENT_VIOLATION", "file": self.path,
+                 "message": "实际 IP 不符合指定网段", "evidence": "192.168.80.128",
+                 "rule": "本题要求使用 10.0.0.0/8 网段"}
+        transport = FakeTransport(model_result("FAIL", issues=[issue]))
+        reviewer = GlmAIReviewer(GlmClient("test-key", transport=transport), github)
+        snapshot = replace(self.snapshot, base_sha="c" * 40,
+                           files=(ChangedFile(self.path, "added", content=template.replace("______", "192.168.80.128")),))
+        result = reviewer.review(self.course, "Lab1", snapshot)
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertNotIn("template_example_issues", result.metadata)
 
     def test_fail_requires_verifiable_evidence(self):
         issue = {

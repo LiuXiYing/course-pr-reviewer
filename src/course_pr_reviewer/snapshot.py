@@ -296,21 +296,19 @@ class GitHubClient:
     def text_file(
         self, repository: str, path: str, ref: str, *, max_bytes: int
     ) -> str | None:
-        if not _safe_file_path(path) or not SHA_RE.fullmatch(ref):
+        if not _safe_file_path(path) or path.endswith("/") or not SHA_RE.fullmatch(ref):
             raise ReviewSystemError("官方模板路径或基础分支 SHA 无效")
         repo = urllib.parse.quote(repository, safe="/")
         filename = urllib.parse.quote(path, safe="/")
-        raw = self.get_bytes(
-            f"/repos/{repo}/contents/{filename}?ref={ref}",
-            max_bytes=max_bytes,
-            accept="application/vnd.github.raw+json",
-        )
-        if b"\0" in raw:
-            return None
-        try:
-            return raw.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            return None
+        entry = self.get_json(f"/repos/{repo}/contents/{filename}?ref={ref}")
+        if (
+            not isinstance(entry, dict)
+            or entry.get("type") != "file"
+            or not isinstance(entry.get("sha"), str)
+            or not SHA_RE.fullmatch(entry["sha"])
+        ):
+            raise ReviewSystemError("官方报告模板必须指向 GitHub 中的普通文件")
+        return self.text_blob(repository, entry["sha"], max_bytes=max_bytes)
 
 
 def load_snapshot(
