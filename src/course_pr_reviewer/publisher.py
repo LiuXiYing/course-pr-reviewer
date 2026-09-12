@@ -180,8 +180,10 @@ def render_comment(result: dict[str, Any]) -> str:
         max_rounds = consensus.get("max_rounds", "?")
         row = (
             f"- {_safe_markdown(label)}：{_safe_markdown(decision_text)}"
-            f"（第 {_safe_markdown(rounds_used)}/{_safe_markdown(max_rounds)} 轮）"
+            f"（已审核 {_safe_markdown(rounds_used)} 轮，最多 {_safe_markdown(max_rounds)} 轮）"
         )
+        if consensus.get("disagreement_pass") is True:
+            row += "；达到复核上限仍有分歧，按规则通过"
         unavailable = consensus.get("unavailable_providers", [])
         if consensus.get("degraded") is True and isinstance(unavailable, list):
             names = "、".join(str(item).upper() for item in unavailable)

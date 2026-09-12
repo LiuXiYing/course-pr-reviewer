@@ -94,7 +94,8 @@ class CourseConfiguration:
 
     @property
     def ai_consensus_rounds(self) -> int:
-        return int(self.data.get("ai", {}).get("consensus_rounds", 1))
+        default = 3 if len(self.ai_providers) == 2 else 1
+        return int(self.data.get("ai", {}).get("consensus_rounds", default))
 
     @property
     def feedback(self) -> dict[str, Any]:
@@ -161,7 +162,8 @@ class CourseConfiguration:
 
     @property
     def vision_consensus_rounds(self) -> int:
-        return int(self.data.get("vision", {}).get("consensus_rounds", 1))
+        default = 3 if len(self.vision_providers) == 2 else 1
+        return int(self.data.get("vision", {}).get("consensus_rounds", default))
 
     def assignment(self, assignment_id: str) -> dict[str, Any] | None:
         return self.assignments.get(assignment_id)
@@ -331,6 +333,9 @@ def load_course_config(path: str | Path) -> CourseConfiguration:
                 raise ConfigurationError(
                     f"{assignment_id} 包含不安全图片模式：{pattern}"
                 )
+        template = assignment.get("report_template")
+        if template is not None and not _safe_relative_path(template):
+            raise ConfigurationError(f"{assignment_id} 包含不安全报告模板路径：{template}")
     course = CourseConfiguration(data)
     for section_name, providers in (
         ("ai", course.ai_providers),

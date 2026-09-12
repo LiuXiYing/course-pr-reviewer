@@ -41,6 +41,7 @@ class PullRequestSnapshot:
     # Capture once for all providers, stages and corrections in this review.
     # Never load this clock from student files or the serialized PR metadata.
     reviewed_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.UTC))
+    base_sha: str | None = None
 
 
 def _aware_datetime(value: str, field: str) -> dt.datetime:
@@ -113,6 +114,11 @@ def snapshot_from_dict(data: dict[str, Any]) -> PullRequestSnapshot:
         data["current_head_sha"]
     ):
         raise ReviewSystemError("PR 快照中的 head SHA 无效")
+    base_sha = data.get("base_sha")
+    if base_sha is not None and (
+        not isinstance(base_sha, str) or not SHA_RE.fullmatch(base_sha)
+    ):
+        raise ReviewSystemError("PR 快照中的 base SHA 无效")
     number = data.get("number")
     if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
         raise ReviewSystemError("PR 快照中的 number 无效")
@@ -130,6 +136,7 @@ def snapshot_from_dict(data: dict[str, Any]) -> PullRequestSnapshot:
         current_head_sha=data["current_head_sha"].lower(),
         event_at=_aware_datetime(data.get("event_at"), "event_at"),
         files=tuple(_changed_file(item) for item in raw_files),
+        base_sha=base_sha.lower() if base_sha else None,
     )
 
 
@@ -286,6 +293,25 @@ class GitHubClient:
         except UnicodeDecodeError:
             return None
 
+    def text_file(
+        self, repository: str, path: str, ref: str, *, max_bytes: int
+    ) -> str | None:
+        if not _safe_file_path(path) or not SHA_RE.fullmatch(ref):
+            raise ReviewSystemError("官方模板路径或基础分支 SHA 无效")
+        repo = urllib.parse.quote(repository, safe="/")
+        filename = urllib.parse.quote(path, safe="/")
+        raw = self.get_bytes(
+            f"/repos/{repo}/contents/{filename}?ref={ref}",
+            max_bytes=max_bytes,
+            accept="application/vnd.github.raw+json",
+        )
+        if b"\0" in raw:
+            return None
+        try:
+            return raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return None
+
 
 def load_snapshot(
     metadata_dir: str | Path,
@@ -342,6 +368,7 @@ def load_snapshot(
             "author_login": pr["user"]["login"],
             "captured_head_sha": captured_sha,
             "current_head_sha": pr["head"]["sha"],
+            "base_sha": pr["base"]["sha"],
             "event_at": event_at,
             "files": files,
         }

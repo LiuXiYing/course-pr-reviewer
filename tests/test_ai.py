@@ -9,6 +9,7 @@ import unittest
 import urllib.error
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock
 
 from course_pr_reviewer.ai import (
     GEMINI_ENDPOINT,
@@ -20,9 +21,9 @@ from course_pr_reviewer.ai import (
 )
 from course_pr_reviewer.config import CourseConfiguration, load_course_config
 from course_pr_reviewer.consensus import TextConsensusReviewer
-from course_pr_reviewer.exceptions import ReviewSystemError
+from course_pr_reviewer.exceptions import ContentLimitExceeded, ReviewSystemError
 from course_pr_reviewer.models import Decision, ReasonCode
-from course_pr_reviewer.snapshot import ChangedFile, PullRequestSnapshot
+from course_pr_reviewer.snapshot import ChangedFile, GitHubClient, PullRequestSnapshot
 
 ROOT = Path(__file__).parents[1]
 
@@ -124,6 +125,82 @@ class GlmAIReviewerTests(unittest.TestCase):
         self.assertEqual(outcome.decision, Decision.PASS)
         request = json.loads(transport.calls[0][2])
         self.assertEqual(request["model"], "gemini-3.5-flash-lite")
+
+    def test_official_template_separates_examples_and_answers_across_reconsideration(self):
+        template_path = "homework/Lab1/Lab1.md"
+        self.course.data["assignments"]["Lab1"]["report_template"] = template_path
+        template = "# Lab1\n示例：ssh student@192.168.80.128\n> 记录：IP 为 ______。\n"
+        content = template.replace("IP 为 ______", "IP 为 192.168.225.128")
+        snapshot = replace(
+            self.snapshot, base_sha="c" * 40,
+            files=(ChangedFile(self.path, "added", content=content),
+                   ChangedFile("student/Lab1/notes.txt", "added", content="补充说明")),
+        )
+        github = Mock(spec=GitHubClient)
+        github.text_file.return_value = template
+        transport = FakeTransport(model_result())
+        reviewer = GlmAIReviewer(GlmClient("test-key", transport=transport), github)
+        prior = {"previous_round": 1, "findings": []}
+        reviewer.review(self.course, "Lab1", snapshot)
+        result = reviewer.review(self.course, "Lab1", snapshot, reconsideration=prior)
+        github.text_file.assert_called_once_with(
+            snapshot.repository, template_path, "c" * 40,
+            max_bytes=self.course.ai["max_file_bytes"],
+        )
+        request = json.loads(transport.calls[-1][2])
+        payload = json.loads(request["messages"][1]["content"].split("\n", 1)[1])
+        segments = payload["files"][0]["segments"]
+        self.assertEqual("".join(part["content"] for part in segments), content)
+        answers = "".join(p["content"] for p in segments if p["kind"] == "submission")
+        self.assertIn("192.168.225.128", answers)
+        self.assertNotIn("192.168.80.128", answers)
+        self.assertEqual(payload["files"][1]["content"], "补充说明")
+        self.assertEqual(payload["prior_disagreement"], prior)
+        self.assertEqual(result.metadata["report_template"]["base_sha"], "c" * 40)
+        self.assertIn("不能因为学生实际值与示例不同而判错", request["messages"][0]["content"])
+
+    def test_template_context_does_not_hide_real_conflicts_or_unfilled_answers(self):
+        template = "# Lab1\n> 记录：Ubuntu 用户名为 ______。\n> 记录：登录后的用户名为 ______。\n"
+        self.course.data["assignments"]["Lab1"]["report_template"] = "homework/Lab1/Lab1.md"
+        github = Mock(spec=GitHubClient)
+        github.text_file.return_value = template
+        samples = (
+            (template, "> 记录：Ubuntu 用户名为 ______。", "必做用户名未填写"),
+            (template.replace("Ubuntu 用户名为 ______", "Ubuntu 用户名为 yanglian")
+                     .replace("登录后的用户名为 ______", "登录后的用户名为 other"),
+             "> 记录：Ubuntu 用户名为 yanglian。\n> 记录：登录后的用户名为 other。", "两次实际用户名不一致"),
+        )
+        for content, evidence, message in samples:
+            with self.subTest(message=message):
+                issue = {"category": "CONTENT_VIOLATION", "message": message,
+                         "file": self.path, "evidence": evidence, "rule": "记录实际用户名"}
+                transport = FakeTransport(model_result("FAIL", issues=[issue]))
+                reviewer = GlmAIReviewer(GlmClient("test-key", transport=transport), github)
+                snapshot = replace(self.snapshot, base_sha="c" * 40,
+                                   files=(ChangedFile(self.path, "added", content=content),))
+                result = reviewer.review(self.course, "Lab1", snapshot)
+                self.assertEqual(result.decision, Decision.FAIL)
+                self.assertEqual(result.issues[0].evidence, evidence)
+
+    def test_configured_template_requires_a_readable_trusted_base(self):
+        self.course.data["assignments"]["Lab1"]["report_template"] = "homework/Lab1/Lab1.md"
+        reviewer, transport = self.reviewer(model_result())
+        with self.assertRaisesRegex(ReviewSystemError, "基础分支 SHA"):
+            reviewer.review(self.course, "Lab1", self.snapshot)
+        self.assertEqual(transport.calls, [])
+
+        github = Mock(spec=GitHubClient)
+        github.text_file.side_effect = ReviewSystemError("template unavailable")
+        reviewer.github = github
+        snapshot = replace(self.snapshot, base_sha="c" * 40)
+        with self.assertRaisesRegex(ReviewSystemError, "template unavailable"):
+            reviewer.review(self.course, "Lab1", snapshot)
+        self.assertEqual(transport.calls, [])
+
+        github.text_file.side_effect = ContentLimitExceeded("template too large")
+        result = reviewer.review(self.course, "Lab1", snapshot)
+        self.assertEqual(result.decision, Decision.MANUAL_REVIEW)
+        self.assertEqual(transport.calls, [])
 
     def test_fail_requires_verifiable_evidence(self):
         issue = {
