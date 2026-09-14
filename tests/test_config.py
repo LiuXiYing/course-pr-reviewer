@@ -120,6 +120,26 @@ class CourseConfigurationTests(unittest.TestCase):
                 with self.subTest(path=unsafe), self.assertRaisesRegex(ConfigurationError, "不安全报告模板"):
                     load_course_config(path)
 
+    def test_required_address_cells_are_validated(self):
+        data = yaml.safe_load((ROOT / "examples/course-review.yml").read_text(encoding="utf-8"))
+        entry = {"file": "Lab1.md", "section": "3.6.4", "row": "data 地址", "columns": [1, 2, 3]}
+        data["assignments"]["Lab1"]["required_address_cells"] = [entry]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "course.yml"
+            path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            self.assertEqual(load_course_config(path).assignments["Lab1"]["required_address_cells"], [entry])
+            for filename in ("../Lab1.md", "/tmp/Lab1.md", "Lab1.md/", "result.png", "missing.md"):
+                entry["file"] = filename
+                path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+                with self.subTest(filename=filename), self.assertRaises(ConfigurationError):
+                    load_course_config(path)
+            entry["file"] = "Lab1.md"
+            for columns in ([], [0], [1, 1], ["1"], [101]):
+                entry["columns"] = columns
+                path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+                with self.subTest(columns=columns), self.assertRaises(ConfigurationError):
+                    load_course_config(path)
+
     def test_consensus_rounds_requires_two_providers(self):
         data = yaml.safe_load(
             (ROOT / "examples/course-review.yml").read_text(encoding="utf-8")

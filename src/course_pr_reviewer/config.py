@@ -338,6 +338,12 @@ def load_course_config(path: str | Path) -> CourseConfiguration:
             not _safe_relative_path(template) or template.endswith("/")
         ):
             raise ConfigurationError(f"{assignment_id} 包含不安全报告模板路径：{template}")
+        for entry in assignment.get("required_address_cells", []):
+            filename = entry["file"]
+            if not _safe_relative_path(filename) or PurePosixPath(filename).suffix.casefold() != ".md":
+                raise ConfigurationError(f"{assignment_id} 必填地址检查文件必须是安全的 Markdown 路径：{filename}")
+            if filename not in assignment["required_files"]:
+                raise ConfigurationError(f"{assignment_id} 必填地址检查文件必须列入 required_files：{filename}")
     course = CourseConfiguration(data)
     for section_name, providers in (
         ("ai", course.ai_providers),

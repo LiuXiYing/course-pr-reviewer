@@ -17,6 +17,7 @@ from .exceptions import (
 )
 from .models import Decision, Issue, ReasonCode, ReviewResult
 from .path_utils import canonical_filename
+from .report_checks import required_address_issues
 from .review_time import review_time_context
 from .snapshot import PullRequestSnapshot
 from .vision import GlmVisionReviewer
@@ -110,7 +111,8 @@ def _report_content_issues(
     github,
 ) -> list[Issue]:
     minimum = assignment.get("min_nonempty_lines", 0)
-    if minimum <= 0:
+    address_requirements = assignment.get("required_address_cells", [])
+    if minimum <= 0 and not address_requirements:
         return []
     max_bytes = course.ai.get("max_file_bytes", 200_000)
     issues: list[Issue] = []
@@ -118,6 +120,13 @@ def _report_content_issues(
         if changed.status == "removed" or not changed.filename.startswith(
             expected_prefix
         ):
+            continue
+        relative = changed.filename[len(expected_prefix):]
+        required_addresses = [
+            entry for entry in address_requirements
+            if canonical_filename(entry["file"]) == canonical_filename(relative)
+        ]
+        if minimum <= 0 and not required_addresses:
             continue
         content = changed.content
         if content is None:
@@ -129,6 +138,8 @@ def _report_content_issues(
                 or PurePosixPath(changed.filename).suffix.casefold()
                 in BINARY_SUFFIXES
             ):
+                if required_addresses:
+                    raise ReviewSystemError(f"无法读取必填地址检查文件：{changed.filename}")
                 continue
             try:
                 content = github.text_blob(
@@ -137,16 +148,23 @@ def _report_content_issues(
                     max_bytes=max_bytes,
                 )
             except (ContentLimitExceeded, ReviewSystemError):
+                if required_addresses:
+                    raise
                 # Load failures are surfaced by the AI stage with proper messages.
                 continue
         if content is None:
+            if required_addresses:
+                raise ReviewSystemError(f"无法读取必填地址检查文件：{changed.filename}")
             continue
+        if required_addresses:
+            issues.extend(required_address_issues(
+                content, required_addresses, changed.filename,
+            ))
         nonempty_lines = sum(
             1 for line in content.splitlines() if line.strip()
         )
         if nonempty_lines >= minimum:
             continue
-        relative = changed.filename[len(expected_prefix):]
         if not content.strip():
             detail = (
                 f"`{relative}` 是空文件（0 字节），没有可审核的实验内容；"

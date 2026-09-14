@@ -4,6 +4,7 @@ import copy
 import datetime as dt
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 from course_pr_reviewer.ai import AIOutcome
 from course_pr_reviewer.config import (
@@ -14,7 +15,7 @@ from course_pr_reviewer.config import (
 from course_pr_reviewer.models import Decision, Issue, ReasonCode
 from course_pr_reviewer.path_utils import canonical_filename, resolve_filename
 from course_pr_reviewer.reviewer import review_pull_request
-from course_pr_reviewer.exceptions import ReviewSystemError
+from course_pr_reviewer.exceptions import ContentLimitExceeded, ReviewSystemError
 from course_pr_reviewer.snapshot import ChangedFile, PullRequestSnapshot
 
 ROOT = Path(__file__).parents[1]
@@ -357,6 +358,67 @@ class DeterministicReviewerTests(unittest.TestCase):
             self.course, self.roster, self.snapshot(files=files)
         )
         self.assertNotIn(ReasonCode.CONTENT_TOO_SHORT, self.codes(result))
+
+    def address_check_snapshot(self, value="（填写）", *, loaded=True):
+        assignment = self.course.data["assignments"]["Lab1"]
+        assignment["min_nonempty_lines"] = 0
+        assignment["required_address_cells"] = [{
+            "file": "Lab1.md", "section": "3.6.4", "row": "data 地址",
+            "columns": [1, 2, 3],
+        }]
+        content = f"#### 3.6.4 观察记录\n| data 地址 | {value} | {value} | {value} |\n"
+        files = (
+            ChangedFile("2023010102刘西莹/Lab1/Lab1.md", "added",
+                        content=content if loaded else None, blob_sha="e" * 40),
+            ChangedFile("2023010102刘西莹/Lab1/result.png", "added"),
+        )
+        return self.snapshot(files=files)
+
+    def test_required_addresses_fail_before_ai_can_approve(self):
+        snapshot = self.address_check_snapshot()
+        self.course.data["features"].update(ai_review=True, vision_review=True)
+        ai = Mock()
+        vision = Mock()
+        result = review_pull_request(self.course, self.roster, snapshot, ai, vision)
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertEqual(len(result.issues), 3)
+        self.assertIn(ReasonCode.REQUIRED_ADDRESS_MISSING, self.codes(result))
+        ai.review.assert_not_called()
+        vision.review.assert_not_called()
+
+    def test_filled_addresses_allow_ai_and_vision_to_review(self):
+        snapshot = self.address_check_snapshot("`0x123abc`")
+        self.course.data["features"].update(ai_review=True, vision_review=True)
+        ai = Mock()
+        vision = Mock()
+        ai.review.return_value = vision.review.return_value = AIOutcome(
+            decision=Decision.PASS, summary="通过", confidence=1.0,
+        )
+        result = review_pull_request(self.course, self.roster, snapshot, ai, vision)
+        self.assertEqual(result.decision, Decision.PASS)
+        ai.review.assert_called_once()
+        vision.review.assert_called_once()
+
+    def test_required_addresses_are_fetched_when_line_check_is_disabled(self):
+        snapshot = self.address_check_snapshot(loaded=False)
+        github = Mock()
+        github.text_blob.return_value = "#### 3.6.4 观察记录\n| data 地址 | | 填写 | （填写） |\n"
+        result = review_pull_request(self.course, self.roster, snapshot, github=github)
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertEqual(len(result.issues), 3)
+        github.text_blob.assert_called_once_with("teacher/course", "e" * 40, max_bytes=200_000)
+
+    def test_unreadable_required_address_report_cannot_pass(self):
+        snapshot = self.address_check_snapshot(loaded=False)
+        github = Mock()
+        for error in (None, ReviewSystemError("HTTP 403"), ContentLimitExceeded("too large")):
+            with self.subTest(error=error):
+                github.text_blob.return_value = None
+                github.text_blob.side_effect = error
+                with self.assertRaises((ReviewSystemError, ContentLimitExceeded)):
+                    review_pull_request(self.course, self.roster, snapshot, github=github)
+        with self.assertRaises(ReviewSystemError):
+            review_pull_request(self.course, self.roster, snapshot)
 
     def test_filename_hyphen_variants_match_ascii_requirements(self):
         self.course.data["assignments"]["Lab1"]["required_files"] = [

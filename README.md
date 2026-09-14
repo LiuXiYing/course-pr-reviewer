@@ -141,6 +141,25 @@ assignments:
 
 模板必须是非空 UTF-8 普通文件。完整分段比对禁用忽略高频行的启发式，模板行数与报告行数的乘积上限为 4,000,000，超过时转人工审核。官方模板明确标为“示例／例如”的原文片段，以及明确介绍为示例的代码块，会额外标记 `is_example`；若模型证据仅引用这些复制的示例，且未出现在其他实际内容中，该问题不作为拒绝依据，保存在 `template_example_issues` 中。未填写的必做记录和学生实际填写仍可作为违规证据。
 
+Markdown 观察表中的必填地址可使用 `required_address_cells` 做程序检查，避免模型漏掉空白或“（填写）”等占位内容：
+
+```yaml
+assignments:
+  Lab5:
+    required_address_cells:
+      - file: Lab5.md
+        section: "3.6.4"
+        row: "当前 data 地址（图 C 为 v.data）"
+        columns: [1, 2, 3]
+      - file: Lab5.md
+        section: "3.6.4"
+        row: "newData 地址"
+        columns: [2]
+    # deadline、required_files、review_points 等沿用本作业配置
+```
+
+`file` 相对于学生作业目录，必须是 `required_files` 中的必交 Markdown 文件；`section` 匹配标题编号或完整标题；`row` 匹配表格第一列，忽略空白和 Markdown 强调、代码标记。`columns` 从行标题后的第一个数据列起按 1 计数，只检查列出的单元格，因此明确标注“不填写”的其他格子可保留原文。检查接受十六进制地址、可选的 `0x` 前缀和 Markdown 包裹，不比较地址的具体数值。只读取指定章节中的表格，不以其他章节、代码块或 HTML 注释中的示例代替答案。缺少记录行或未填写地址会在 AI 阶段之前返回 `REQUIRED_ADDRESS_MISSING`；文件读取失败会停止审核。该检查与 `min_nonempty_lines` 独立，未配置的作业保持原有行为。
+
 `auto_merge` 需要额外的 `merge-token` 输入：GITHUB_TOKEN 无权合并 PR，会返回 `403 Resource not accessible by integration`，必须提供一个具备仓库写权限的 PAT。未配置时合并会失败，其余审核与评论功能不受影响。
 
 需要看图才能判断的审核点应放进 `vision_review_points`。纯文本阶段只会收到 `review_points`，不会收到图片审核点，也不会收到图片文件名；视觉阶段优先使用 `vision_review_points`，未配置时回退到 `review_points`。把两类审核点混在一起会让文本阶段看到自己无法验证的条件，从而产生无法复核的 `AI_UNCERTAIN`。
