@@ -540,5 +540,184 @@ class DeterministicReviewerTests(unittest.TestCase):
         self.assertIn(ReasonCode.SERVICE_ERROR, self.codes(result))
 
 
+class LateSubmissionOrderTests(unittest.TestCase):
+    """截止时间判定排在内容审核之后，且不再短路任何内容审核。
+
+    规则：内容问题照常返回，超时只作为附加结论跟在后面；内容全部通过、只是超时
+    时才需要单独说明，避免学生以为作业内容不合格。
+    """
+
+    PLUS_8 = dt.timezone(dt.timedelta(hours=8))
+    # 比截止时间 2026-09-01T23:59:59+08:00 晚 36 小时 1 秒：已超时，但没到关闭阈值。
+    LATE = dt.datetime(2026, 9, 3, 12, tzinfo=PLUS_8)
+    # 超出截止时间 18 天，越过默认的 7 天关闭阈值。
+    VERY_LATE = dt.datetime(2026, 9, 20, tzinfo=PLUS_8)
+
+    def setUp(self):
+        loaded = load_course_config(ROOT / "examples/course-review.yml")
+        data = copy.deepcopy(loaded.data)
+        data["features"].update(
+            ai_review=True, vision_review=True, close_late_pr=True
+        )
+        data["assignments"]["Lab1"]["deadline"] = "2026-09-01T23:59:59+08:00"
+        self.course = CourseConfiguration(data)
+        self.roster = load_student_roster(ROOT / "examples/students.yml")
+
+    def snapshot(self, **overrides):
+        values = {
+            "repository": "teacher/course",
+            "number": 12,
+            "title": "[2023010102刘西莹]Lab1作业提交",
+            "author_login": "example-user",
+            "captured_head_sha": SHA,
+            "current_head_sha": SHA,
+            "event_at": self.LATE,
+            "files": (
+                ChangedFile("2023010102刘西莹/Lab1/Lab1.md", "added"),
+                ChangedFile("2023010102刘西莹/Lab1/result.png", "added"),
+            ),
+        }
+        values.update(overrides)
+        return PullRequestSnapshot(**values)
+
+    def passing_reviewer(self):
+        reviewer = Mock()
+        reviewer.review.return_value = AIOutcome(
+            decision=Decision.PASS, summary="通过", confidence=1.0,
+        )
+        return reviewer
+
+    def codes(self, result):
+        return {issue.code for issue in result.issues}
+
+    def test_late_submission_still_runs_ai_and_vision_review(self):
+        ai, vision = self.passing_reviewer(), self.passing_reviewer()
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(), ai, vision
+        )
+        ai.review.assert_called_once()
+        vision.review.assert_called_once()
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertEqual(result.reason_codes, ("DEADLINE_EXCEEDED",))
+
+    def test_only_late_says_content_passed(self):
+        ai, vision = self.passing_reviewer(), self.passing_reviewer()
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(), ai, vision
+        )
+        self.assertEqual(len(result.issues), 1)
+        self.assertIn("作业内容审核已全部通过", result.summary)
+        self.assertIn("晚于截止时间", result.summary)
+        self.assertIn("36 小时", result.issues[0].message)
+        self.assertEqual(result.metadata["late_seconds"], 129_601)
+        self.assertNotIn("close_pr", result.metadata)
+
+    def test_late_with_ai_rejection_keeps_content_summary_and_reports_both(self):
+        ai = Mock()
+        ai.review.return_value = AIOutcome(
+            decision=Decision.FAIL,
+            summary="AI 发现内容问题",
+            issues=(
+                Issue(code=ReasonCode.AI_REJECTED, message="学生内容不符合评分点"),
+            ),
+            confidence=0.95,
+        )
+        vision = self.passing_reviewer()
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(), ai, vision
+        )
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertEqual(result.summary, "AI 发现内容问题")
+        self.assertIn(ReasonCode.AI_REJECTED, self.codes(result))
+        self.assertIn(ReasonCode.DEADLINE_EXCEEDED, self.codes(result))
+        self.assertEqual(result.issues[-1].code, ReasonCode.DEADLINE_EXCEEDED)
+        vision.review.assert_not_called()
+
+    def test_very_late_submission_still_requests_automatic_close(self):
+        ai, vision = self.passing_reviewer(), self.passing_reviewer()
+        result = review_pull_request(
+            self.course,
+            self.roster,
+            self.snapshot(event_at=self.VERY_LATE),
+            ai,
+            vision,
+        )
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertEqual(result.reason_codes, ("LATE_PR_CLOSE_REQUIRED",))
+        self.assertTrue(result.metadata["close_pr"])
+        self.assertIn("作业内容审核已全部通过", result.summary)
+        self.assertIn("关闭", result.summary)
+
+    def test_deterministic_content_error_still_reports_the_late_close(self):
+        ai, vision = self.passing_reviewer(), self.passing_reviewer()
+        files = (ChangedFile("2023010102刘西莹/Lab1/Lab1.md", "added"),)
+        result = review_pull_request(
+            self.course,
+            self.roster,
+            self.snapshot(event_at=self.VERY_LATE, files=files),
+            ai,
+            vision,
+        )
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertIn(ReasonCode.REQUIRED_FILE_MISSING, self.codes(result))
+        self.assertIn(ReasonCode.LATE_PR_CLOSE_REQUIRED, self.codes(result))
+        self.assertTrue(result.metadata["close_pr"])
+        ai.review.assert_not_called()
+
+    def test_empty_late_pull_request_is_still_reported_as_late(self):
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(event_at=self.LATE, files=())
+        )
+        self.assertIn(ReasonCode.NO_FILES_CHANGED, self.codes(result))
+        self.assertIn(ReasonCode.DEADLINE_EXCEEDED, self.codes(result))
+
+    def test_late_manual_review_never_requests_automatic_close(self):
+        ai = Mock()
+        ai.review.return_value = AIOutcome(
+            decision=Decision.MANUAL_REVIEW,
+            summary="AI 无法确认",
+            issues=(Issue(code=ReasonCode.AI_UNCERTAIN, message="证据不足"),),
+        )
+        vision = self.passing_reviewer()
+        result = review_pull_request(
+            self.course,
+            self.roster,
+            self.snapshot(event_at=self.VERY_LATE),
+            ai,
+            vision,
+        )
+        self.assertEqual(result.decision, Decision.MANUAL_REVIEW)
+        self.assertNotIn("close_pr", result.metadata)
+        self.assertNotIn(ReasonCode.LATE_PR_CLOSE_REQUIRED, self.codes(result))
+        self.assertIn(ReasonCode.DEADLINE_EXCEEDED, self.codes(result))
+
+    def test_unidentifiable_pull_request_is_not_judged_on_time(self):
+        # 标题里认不出作业编号时拿不到 deadline，超时无从判定。
+        result = review_pull_request(
+            self.course,
+            self.roster,
+            self.snapshot(event_at=self.VERY_LATE, title="Lab1"),
+        )
+        self.assertIn(ReasonCode.TITLE_MISMATCH, self.codes(result))
+        self.assertNotIn(ReasonCode.DEADLINE_EXCEEDED, self.codes(result))
+        self.assertNotIn("close_pr", result.metadata)
+        self.assertNotIn("late_seconds", result.metadata)
+
+    def test_on_time_submission_is_untouched_by_the_late_step(self):
+        ai, vision = self.passing_reviewer(), self.passing_reviewer()
+        result = review_pull_request(
+            self.course,
+            self.roster,
+            self.snapshot(
+                event_at=dt.datetime(2026, 8, 20, tzinfo=self.PLUS_8)
+            ),
+            ai,
+            vision,
+        )
+        self.assertEqual(result.decision, Decision.PASS)
+        self.assertNotIn("late_seconds", result.metadata)
+        self.assertNotIn("close_pr", result.metadata)
+
+
 if __name__ == "__main__":
     unittest.main()

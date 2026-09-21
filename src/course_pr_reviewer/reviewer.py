@@ -187,6 +187,66 @@ def _with_defaults(course: CourseConfiguration, assignment: dict) -> dict:
     return merged
 
 
+def _late_deadline_issues(
+    course: CourseConfiguration,
+    assignment: dict,
+    snapshot: PullRequestSnapshot,
+    *,
+    close_allowed: bool,
+    metadata: dict,
+) -> list[Issue]:
+    """截止时间判定：整条流水线的最后一步。
+
+    只负责把超时描述清楚，并写入 ``late_seconds`` / ``close_pr`` 元数据；
+    内容结论由调用方保留，超时只作为补充说明追加在后面。
+
+    ``close_allowed`` 为假时不产出 ``LATE_PR_CLOSE_REQUIRED``：该原因代码会驱动
+    发布环节关闭 PR，只有最终决策确定是 FAIL 时才能给出，否则发布环节会因
+    决策与原因代码不匹配而报错。
+    """
+    deadline = dt.datetime.fromisoformat(assignment["deadline"])
+    if snapshot.event_at <= deadline:
+        return []
+    late_by = snapshot.event_at - deadline
+    metadata["late_seconds"] = int(late_by.total_seconds())
+    hours = int(late_by.total_seconds() // 3600)
+    close_after_days = assignment.get("late_close_after_days", 7)
+    close_required = (
+        close_allowed
+        and course.feature_enabled("close_late_pr")
+        and late_by >= dt.timedelta(days=close_after_days)
+    )
+    message = f"本次 PR 最后一次推送时间晚于截止时间 {hours} 小时"
+    if close_required:
+        metadata["close_pr"] = True
+        message += f"；超过 {close_after_days} 天关闭阈值"
+    return [
+        _issue(
+            (
+                ReasonCode.LATE_PR_CLOSE_REQUIRED
+                if close_required
+                else ReasonCode.DEADLINE_EXCEEDED
+            ),
+            message,
+        )
+    ]
+
+
+def _attach_late(
+    result: ReviewResult, late_issues: list[Issue]
+) -> ReviewResult:
+    """把超时结论追加到内容结论之后，内容结论本身保持不变。"""
+    if not late_issues:
+        return result
+    return ReviewResult(
+        decision=result.decision,
+        summary=result.summary,
+        issues=result.issues + tuple(late_issues),
+        confidence=result.confidence,
+        metadata=result.metadata,
+    )
+
+
 def review_pull_request(
     course: CourseConfiguration,
     roster: StudentRoster,
@@ -353,15 +413,21 @@ def review_pull_request(
             metadata=metadata,
         )
 
+    assignment = _with_defaults(course, assignment)
+
     if not snapshot.files:
-        return ReviewResult(
-            decision=Decision.FAIL,
-            summary="PR 不包含任何文件变更。",
-            issues=(_issue(ReasonCode.NO_FILES_CHANGED, "未检测到变更文件"),),
-            metadata=metadata,
+        return _attach_late(
+            ReviewResult(
+                decision=Decision.FAIL,
+                summary="PR 不包含任何文件变更。",
+                issues=(_issue(ReasonCode.NO_FILES_CHANGED, "未检测到变更文件"),),
+                metadata=metadata,
+            ),
+            _late_deadline_issues(
+                course, assignment, snapshot, close_allowed=True, metadata=metadata
+            ),
         )
 
-    assignment = _with_defaults(course, assignment)
     expected_dir = course.expected_submission_dir(student, assignment_id)
     expected_prefix = expected_dir + "/"
     canonical_expected_prefix = canonical_filename(expected_prefix)
@@ -418,44 +484,26 @@ def review_pull_request(
         _report_content_issues(course, assignment, snapshot, expected_prefix, github)
     )
 
-    deadline = dt.datetime.fromisoformat(assignment["deadline"])
-    if snapshot.event_at > deadline:
-        late_by = snapshot.event_at - deadline
-        hours = int(late_by.total_seconds() // 3600)
-        metadata["late_seconds"] = int(late_by.total_seconds())
-        close_after_days = assignment.get("late_close_after_days", 7)
-        close_required = course.feature_enabled(
-            "close_late_pr"
-        ) and late_by >= dt.timedelta(days=close_after_days)
-        if close_required:
-            metadata["close_pr"] = True
-        issues.append(
-            _issue(
-                (
-                    ReasonCode.LATE_PR_CLOSE_REQUIRED
-                    if close_required
-                    else ReasonCode.DEADLINE_EXCEEDED
-                ),
-                (
-                    f"本次 PR 最后一次推送时间晚于截止时间 {hours} 小时；"
-                    f"超过 {close_after_days} 天关闭阈值"
-                    if close_required
-                    else f"本次 PR 最后一次推送时间晚于截止时间 {hours} 小时"
-                ),
-            )
+    if issues:
+        return _attach_late(
+            ReviewResult(
+                decision=Decision.FAIL,
+                summary=f"确定性审核发现 {len(issues)} 个问题。",
+                issues=tuple(issues),
+                metadata=metadata,
+            ),
+            _late_deadline_issues(
+                course, assignment, snapshot, close_allowed=True, metadata=metadata
+            ),
         )
 
-    if issues:
-        return ReviewResult(
-            decision=Decision.FAIL,
-            summary=f"确定性审核发现 {len(issues)} 个问题。",
-            issues=tuple(issues),
-            metadata=metadata,
-        )
+    # 内容审核（AI 文本、图片）的结论先记录，不在这里返回：截止时间判定排在最后，
+    # 超时只作为附加结论附到最终结论上，不参与内容判定。
+    content_result: ReviewResult | None = None
 
     if course.assignment_feature_enabled(assignment_id, "ai_review"):
         if ai_reviewer is None:
-            return ReviewResult(
+            content_result = ReviewResult(
                 decision=Decision.ERROR,
                 summary="已启用 AI 审核，但所选 AI 审核器未正确配置。",
                 issues=(
@@ -471,41 +519,45 @@ def review_pull_request(
                 ),
                 metadata=metadata,
             )
-        try:
-            ai_outcome = ai_reviewer.review(course, assignment_id, snapshot)
-        except ReviewSystemError as exc:
-            return ReviewResult(
-                decision=Decision.ERROR,
-                summary="AI 内容审核无法可靠完成。",
-                issues=(_issue(ReasonCode.SERVICE_ERROR, str(exc)),),
-                metadata=metadata,
-            )
-        metadata["ai_provider"] = course.ai["provider"]
-        metadata["ai_model"] = course.ai["model"]
-        metadata["ai_providers"] = [
-            settings["provider"] for settings in course.ai_providers
-        ]
-        metadata["ai_models"] = {
-            settings["provider"]: settings["model"]
-            for settings in course.ai_providers
-        }
-        metadata.update(
-            {f"ai_{key}": value for key, value in ai_outcome.metadata.items()}
-        )
-        if ai_outcome.confidence is not None:
-            metadata["ai_confidence"] = ai_outcome.confidence
-        if ai_outcome.decision is not Decision.PASS:
-            return ReviewResult(
-                decision=ai_outcome.decision,
-                summary=ai_outcome.summary,
-                issues=ai_outcome.issues,
-                confidence=ai_outcome.confidence,
-                metadata=metadata,
-            )
+        else:
+            try:
+                ai_outcome = ai_reviewer.review(course, assignment_id, snapshot)
+            except ReviewSystemError as exc:
+                content_result = ReviewResult(
+                    decision=Decision.ERROR,
+                    summary="AI 内容审核无法可靠完成。",
+                    issues=(_issue(ReasonCode.SERVICE_ERROR, str(exc)),),
+                    metadata=metadata,
+                )
+            else:
+                metadata["ai_provider"] = course.ai["provider"]
+                metadata["ai_model"] = course.ai["model"]
+                metadata["ai_providers"] = [
+                    settings["provider"] for settings in course.ai_providers
+                ]
+                metadata["ai_models"] = {
+                    settings["provider"]: settings["model"]
+                    for settings in course.ai_providers
+                }
+                metadata.update(
+                    {f"ai_{key}": value for key, value in ai_outcome.metadata.items()}
+                )
+                if ai_outcome.confidence is not None:
+                    metadata["ai_confidence"] = ai_outcome.confidence
+                if ai_outcome.decision is not Decision.PASS:
+                    content_result = ReviewResult(
+                        decision=ai_outcome.decision,
+                        summary=ai_outcome.summary,
+                        issues=ai_outcome.issues,
+                        confidence=ai_outcome.confidence,
+                        metadata=metadata,
+                    )
 
-    if course.assignment_feature_enabled(assignment_id, "vision_review"):
+    if content_result is None and course.assignment_feature_enabled(
+        assignment_id, "vision_review"
+    ):
         if vision_reviewer is None:
-            return ReviewResult(
+            content_result = ReviewResult(
                 decision=Decision.ERROR,
                 summary="已启用图片审核，但所选图片审核器未正确配置。",
                 issues=(
@@ -522,46 +574,81 @@ def review_pull_request(
                 ),
                 metadata=metadata,
             )
-        try:
-            vision_outcome = vision_reviewer.review(
-                course, assignment_id, snapshot, expected_dir
-            )
-        except InvalidStudentImage as exc:
-            return ReviewResult(
-                decision=Decision.FAIL,
-                summary="提交的图片文件无效或超过安全限制。",
-                issues=(_issue(ReasonCode.INVALID_FILE, str(exc)),),
+        else:
+            try:
+                vision_outcome = vision_reviewer.review(
+                    course, assignment_id, snapshot, expected_dir
+                )
+            except InvalidStudentImage as exc:
+                content_result = ReviewResult(
+                    decision=Decision.FAIL,
+                    summary="提交的图片文件无效或超过安全限制。",
+                    issues=(_issue(ReasonCode.INVALID_FILE, str(exc)),),
+                    metadata=metadata,
+                )
+            except ReviewSystemError as exc:
+                content_result = ReviewResult(
+                    decision=Decision.ERROR,
+                    summary="OCR 或 AI 图片审核无法可靠完成。",
+                    issues=(_issue(ReasonCode.SERVICE_ERROR, str(exc)),),
+                    metadata=metadata,
+                )
+            else:
+                metadata["vision_provider"] = course.vision["provider"]
+                metadata["vision_model"] = course.vision["model"]
+                metadata["vision_providers"] = [
+                    settings["provider"] for settings in course.vision_providers
+                ]
+                metadata["vision_models"] = {
+                    settings["provider"]: settings["model"]
+                    for settings in course.vision_providers
+                }
+                metadata.update(
+                    {
+                        f"vision_{key}": value
+                        for key, value in vision_outcome.metadata.items()
+                    }
+                )
+                if vision_outcome.confidence is not None:
+                    metadata["vision_confidence"] = vision_outcome.confidence
+                if vision_outcome.decision is not Decision.PASS:
+                    content_result = ReviewResult(
+                        decision=vision_outcome.decision,
+                        summary=vision_outcome.summary,
+                        issues=vision_outcome.issues,
+                        confidence=vision_outcome.confidence,
+                        metadata=metadata,
+                    )
+
+    # 截止时间判定放在最后一步：内容已经审完，超时不再是短路条件。
+    if content_result is not None:
+        return _attach_late(
+            content_result,
+            _late_deadline_issues(
+                course,
+                assignment,
+                snapshot,
+                close_allowed=content_result.decision is Decision.FAIL,
                 metadata=metadata,
-            )
-        except ReviewSystemError as exc:
-            return ReviewResult(
-                decision=Decision.ERROR,
-                summary="OCR 或 AI 图片审核无法可靠完成。",
-                issues=(_issue(ReasonCode.SERVICE_ERROR, str(exc)),),
-                metadata=metadata,
-            )
-        metadata["vision_provider"] = course.vision["provider"]
-        metadata["vision_model"] = course.vision["model"]
-        metadata["vision_providers"] = [
-            settings["provider"] for settings in course.vision_providers
-        ]
-        metadata["vision_models"] = {
-            settings["provider"]: settings["model"]
-            for settings in course.vision_providers
-        }
-        metadata.update(
-            {f"vision_{key}": value for key, value in vision_outcome.metadata.items()}
+            ),
         )
-        if vision_outcome.confidence is not None:
-            metadata["vision_confidence"] = vision_outcome.confidence
-        if vision_outcome.decision is not Decision.PASS:
-            return ReviewResult(
-                decision=vision_outcome.decision,
-                summary=vision_outcome.summary,
-                issues=vision_outcome.issues,
-                confidence=vision_outcome.confidence,
-                metadata=metadata,
-            )
+
+    late_issues = _late_deadline_issues(
+        course, assignment, snapshot, close_allowed=True, metadata=metadata
+    )
+    if late_issues:
+        # 内容没有任何问题，只因为超时才未通过：必须说清楚，避免学生以为作业内容不合格。
+        return ReviewResult(
+            decision=Decision.FAIL,
+            summary=(
+                "作业内容审核已全部通过，本次提交的唯一问题是晚于截止时间。"
+                if late_issues[0].code is ReasonCode.DEADLINE_EXCEEDED
+                else "作业内容审核已全部通过，但提交时间已超过截止时间与关闭阈值，"
+                "将按课程规则关闭该 PR。"
+            ),
+            issues=tuple(late_issues),
+            metadata=metadata,
+        )
 
     return ReviewResult(
         decision=Decision.PASS,
