@@ -5,19 +5,24 @@ import copy
 import datetime as dt
 import io
 import json
+import socket
 import unittest
 import urllib.error
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from course_pr_reviewer.ai import (
     GEMINI_ENDPOINT,
+    GLM_ENDPOINT,
     GeminiClient,
     GlmAIReviewer,
     GlmClient,
     _TransientAIError,
+    _default_transport,
+    _gemini_transport,
     _provider_error_code,
+    _provider_error_value,
 )
 from course_pr_reviewer.config import CourseConfiguration, load_course_config
 from course_pr_reviewer.consensus import TextConsensusReviewer
@@ -738,6 +743,108 @@ class GeminiClientTests(unittest.TestCase):
         self.assertTrue(url.startswith("data:image/png;base64,"))
         self.assertEqual(base64.b64decode(url.split(",", 1)[1]), b"\x89PNG")
 
+
+class ProviderErrorDetailTests(unittest.TestCase):
+    """Operators must be able to tell from the Actions log why a provider failed."""
+
+    GEMINI_503 = [
+        {
+            "error": {
+                "code": 503,
+                "message": (
+                    "This model is currently experiencing high demand. "
+                    "Spikes in demand are usually temporary. Please try again later."
+                ),
+                "status": "UNAVAILABLE",
+            }
+        }
+    ]
+
+    @staticmethod
+    def http_error(code, payload):
+        return urllib.error.HTTPError(
+            "https://example.invalid",
+            code,
+            "error",
+            {},
+            io.BytesIO(json.dumps(payload).encode("utf-8")),
+        )
+
+    def test_gemini_list_wrapped_error_status_is_extracted(self):
+        error = self.http_error(503, self.GEMINI_503)
+        self.assertEqual(_provider_error_value(error, "status"), "UNAVAILABLE")
+
+    def test_gemini_transient_error_names_the_status(self):
+        with patch("urllib.request.urlopen", side_effect=self.http_error(503, self.GEMINI_503)):
+            with self.assertRaisesRegex(_TransientAIError, "HTTP 503，状态 UNAVAILABLE"):
+                _gemini_transport(GEMINI_ENDPOINT, {}, b"{}", 10)
+
+    def test_gemini_configuration_error_names_the_status(self):
+        payload = [
+            {
+                "error": {
+                    "code": 400,
+                    "message": "Please pass a valid API key",
+                    "status": "INVALID_ARGUMENT",
+                }
+            }
+        ]
+        with patch("urllib.request.urlopen", side_effect=self.http_error(400, payload)):
+            with self.assertRaisesRegex(ReviewSystemError, "HTTP 400，状态 INVALID_ARGUMENT"):
+                _gemini_transport(GEMINI_ENDPOINT, {}, b"{}", 10)
+
+    def test_gemini_provider_message_is_logged_but_kept_out_of_the_error(self):
+        with patch("urllib.request.urlopen", side_effect=self.http_error(503, self.GEMINI_503)):
+            with self.assertLogs("course_pr_reviewer.ai", level="WARNING") as logs:
+                with self.assertRaises(_TransientAIError) as raised:
+                    _gemini_transport(GEMINI_ENDPOINT, {}, b"{}", 10)
+        self.assertIn("high demand", "\n".join(logs.output))
+        self.assertNotIn("high demand", str(raised.exception))
+
+    def test_gemini_connection_error_names_the_underlying_failure(self):
+        reason = socket.gaierror(-3, "Temporary failure in name resolution")
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError(reason)):
+            with self.assertRaisesRegex(_TransientAIError, "Gemini API 连接或超时错误（gaierror）"):
+                _gemini_transport(GEMINI_ENDPOINT, {}, b"{}", 10)
+
+    def test_gemini_read_timeout_is_reported_as_timeout(self):
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            with self.assertRaisesRegex(_TransientAIError, "Gemini API 连接或超时错误（超时）"):
+                _gemini_transport(GEMINI_ENDPOINT, {}, b"{}", 10)
+
+    def test_glm_connection_error_names_the_underlying_failure(self):
+        reason = ConnectionResetError(104, "Connection reset by peer")
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError(reason)):
+            with self.assertRaisesRegex(
+                _TransientAIError, "GLM API 连接或超时错误（ConnectionResetError）"
+            ):
+                _default_transport(GLM_ENDPOINT, {}, b"{}", 10)
+
+    def test_glm_provider_message_is_logged_with_business_code(self):
+        payload = {"error": {"code": "1305", "message": "当前 API 请求过多，请稍后重试"}}
+        with patch("urllib.request.urlopen", side_effect=self.http_error(429, payload)):
+            with self.assertLogs("course_pr_reviewer.ai", level="WARNING") as logs:
+                with self.assertRaisesRegex(_TransientAIError, "业务错误码 1305"):
+                    _default_transport(GLM_ENDPOINT, {}, b"{}", 10)
+        self.assertIn("1305", "\n".join(logs.output))
+        self.assertIn("请求过多", "\n".join(logs.output))
+
+    def test_each_failed_attempt_is_logged_with_its_position(self):
+        transport = FakeTransport(model_result(), transient_failures=2)
+        client = GeminiClient(
+            "test-gemini-key", transport=transport, sleeper=lambda _: None
+        )
+        with self.assertLogs("course_pr_reviewer.ai", level="WARNING") as logs:
+            client.complete(
+                model="gemini-3.5-flash-lite",
+                messages=[{"role": "user", "content": "test"}],
+                timeout_seconds=10,
+                max_attempts=3,
+                max_output_tokens=100,
+            )
+        self.assertEqual(len(logs.output), 2)
+        self.assertIn("第 1/3 次", logs.output[0])
+        self.assertIn("第 2/3 次", logs.output[1])
 
 if __name__ == "__main__":
     unittest.main()
