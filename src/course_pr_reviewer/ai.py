@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import urllib.error
@@ -64,6 +65,11 @@ BINARY_SUFFIXES = {
 
 Transport = Callable[[str, dict[str, str], bytes, int], dict[str, Any]]
 
+LOGGER = logging.getLogger(__name__)
+# 供应商返回的 message 只进运行日志，不进 PR 评论或邮件；
+# 截断以防日志被刷屏。
+_MAX_LOGGED_MESSAGE_CHARS = 200
+
 _MARKDOWN_ESCAPE_RE = re.compile(r"\\([\\`*{}\[\]()#+.!|>_-])")
 _EVIDENCE_LAYOUT_RE = re.compile(r"[|`\s]+")
 
@@ -110,9 +116,10 @@ def _retry_after_seconds(value: str | None) -> float | None:
     return min(seconds, 120.0) if seconds >= 0 else None
 
 
-def _provider_error_value(
-    exc: urllib.error.HTTPError, field: str
-) -> str | None:
+def _provider_error_payload(
+    exc: urllib.error.HTTPError,
+) -> dict[str, Any] | None:
+    """Return the provider's error object, reading the HTTP body exactly once."""
     try:
         raw = exc.read(8193)
         if len(raw) > 8192:
@@ -120,9 +127,19 @@ def _provider_error_value(
         payload = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
+    # Gemini 的 OpenAI 兼容接口把错误包在单元素数组里：[{"error": {...}}]。
+    if isinstance(payload, list) and len(payload) == 1:
+        payload = payload[0]
     if not isinstance(payload, dict) or not isinstance(payload.get("error"), dict):
         return None
-    value = payload["error"].get(field)
+    return payload["error"]
+
+
+def _error_field(error: dict[str, Any] | None, field: str) -> str | None:
+    """Short structured fields (code / status) are safe to surface in error text."""
+    if error is None:
+        return None
+    value = error.get(field)
     if isinstance(value, (str, int)) and not isinstance(value, bool):
         normalized = str(value)
         if 1 <= len(normalized) <= 32:
@@ -130,8 +147,46 @@ def _provider_error_value(
     return None
 
 
+def _provider_error_value(
+    exc: urllib.error.HTTPError, field: str
+) -> str | None:
+    return _error_field(_provider_error_payload(exc), field)
+
+
 def _provider_error_code(exc: urllib.error.HTTPError) -> str | None:
     return _provider_error_value(exc, "code")
+
+
+def _log_provider_http_error(
+    provider: str, exc: urllib.error.HTTPError, error: dict[str, Any] | None
+) -> None:
+    """Keep the provider's own explanation in the run log so operators can act on it."""
+    message = error.get("message") if error else None
+    if isinstance(message, str):
+        message = " ".join(message.split())[:_MAX_LOGGED_MESSAGE_CHARS]
+    fields = [f"HTTP {exc.code}"]
+    status = _error_field(error, "status")
+    if status:
+        fields.append(f"状态 {status}")
+    provider_code = _error_field(error, "code")
+    if provider_code and provider_code != str(exc.code):
+        fields.append(f"业务错误码 {provider_code}")
+    LOGGER.warning(
+        "%s API 请求被拒绝（%s）：%s",
+        provider, "，".join(fields), message or "无错误说明",
+    )
+
+
+def _connection_error_detail(exc: BaseException) -> str:
+    """Name the failing layer (DNS, reset, TLS, timeout) without echoing any payload."""
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, TimeoutError):
+        return "超时"
+    if isinstance(reason, str):
+        if "timed out" in reason:
+            return "超时"
+        return " ".join(reason.split())[:60] or type(exc).__name__
+    return type(reason).__name__
 
 
 def _response_schema() -> dict[str, Any]:
@@ -150,7 +205,9 @@ def _default_transport(
                 raise ReviewSystemError("GLM API HTTP 响应超过 1 MB 安全上限")
             payload = json.loads(raw_response.decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        provider_code = _provider_error_code(exc)
+        error = _provider_error_payload(exc)
+        _log_provider_http_error("GLM", exc, error)
+        provider_code = _error_field(error, "code")
         detail = (
             f"HTTP {exc.code}，业务错误码 {provider_code}"
             if provider_code
@@ -169,7 +226,9 @@ def _default_transport(
             ) from exc
         raise ReviewSystemError(f"GLM API 请求失败（HTTP {exc.code}）") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise _TransientAIError("GLM API 连接或超时错误") from exc
+        raise _TransientAIError(
+            f"GLM API 连接或超时错误（{_connection_error_detail(exc)}）"
+        ) from exc
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ReviewSystemError("GLM API 返回的 HTTP 响应不是有效 JSON") from exc
     if not isinstance(payload, dict):
@@ -188,7 +247,9 @@ def _gemini_transport(
                 raise ReviewSystemError("Gemini API HTTP 响应超过 1 MB 安全上限")
             payload = json.loads(raw_response.decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        status = _provider_error_value(exc, "status")
+        error = _provider_error_payload(exc)
+        _log_provider_http_error("Gemini", exc, error)
+        status = _error_field(error, "status")
         detail = f"HTTP {exc.code}" + (f"，状态 {status}" if status else "")
         if exc.code == 429 or 500 <= exc.code < 600:
             raise _TransientAIError(
@@ -203,7 +264,9 @@ def _gemini_transport(
             ) from exc
         raise ReviewSystemError(f"Gemini API 请求失败（{detail}）") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise _TransientAIError("Gemini API 连接或超时错误") from exc
+        raise _TransientAIError(
+            f"Gemini API 连接或超时错误（{_connection_error_detail(exc)}）"
+        ) from exc
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ReviewSystemError("Gemini API 返回的 HTTP 响应不是有效 JSON") from exc
     if not isinstance(payload, dict):
@@ -277,6 +340,9 @@ class GlmClient:
                 return self._transport(self._endpoint, headers, body, timeout_seconds)
             except _TransientAIError as exc:
                 if attempt == max_attempts:
+                    LOGGER.warning(
+                        "第 %d/%d 次请求失败：%s；不再重试", attempt, max_attempts, exc
+                    )
                     raise ProviderUnavailableError(
                         f"GLM API 在 {max_attempts} 次尝试后仍不可用：{exc}"
                     ) from exc
@@ -284,6 +350,10 @@ class GlmClient:
                     exc.retry_after_seconds
                     if exc.retry_after_seconds is not None
                     else float(min(5 * (2 ** (attempt - 1)), 60))
+                )
+                LOGGER.warning(
+                    "第 %d/%d 次请求失败：%s；%.0f 秒后重试",
+                    attempt, max_attempts, exc, delay,
                 )
                 self._sleeper(delay)
         raise AssertionError("unreachable")
@@ -348,6 +418,9 @@ class GeminiClient:
                 return self._transport(self._endpoint, headers, body, timeout_seconds)
             except _TransientAIError as exc:
                 if attempt == max_attempts:
+                    LOGGER.warning(
+                        "第 %d/%d 次请求失败：%s；不再重试", attempt, max_attempts, exc
+                    )
                     raise ProviderUnavailableError(
                         f"Gemini API 在 {max_attempts} 次尝试后仍不可用：{exc}"
                     ) from exc
@@ -355,6 +428,10 @@ class GeminiClient:
                     exc.retry_after_seconds
                     if exc.retry_after_seconds is not None
                     else float(min(5 * (2 ** (attempt - 1)), 60))
+                )
+                LOGGER.warning(
+                    "第 %d/%d 次请求失败：%s；%.0f 秒后重试",
+                    attempt, max_attempts, exc, delay,
                 )
                 self._sleeper(delay)
         raise AssertionError("unreachable")
