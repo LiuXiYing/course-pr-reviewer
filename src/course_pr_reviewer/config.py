@@ -344,6 +344,21 @@ def load_course_config(path: str | Path) -> CourseConfiguration:
                 raise ConfigurationError(f"{assignment_id} 必填地址检查文件必须是安全的 Markdown 路径：{filename}")
             if filename not in assignment["required_files"]:
                 raise ConfigurationError(f"{assignment_id} 必填地址检查文件必须列入 required_files：{filename}")
+        metrics = assignment.get("template_metrics", {})
+        filename = metrics.get("report_file")
+        if filename is not None and (
+            not _safe_relative_path(filename)
+            or PurePosixPath(filename).suffix.casefold() != ".md"
+            or filename not in assignment["required_files"]
+        ):
+            raise ConfigurationError(
+                f"{assignment_id}.template_metrics.report_file 必须是 required_files 中的精确 Markdown 路径"
+            )
+        if metrics.get("enabled", False):
+            if not filename or not template or PurePosixPath(template).suffix.casefold() != ".md":
+                raise ConfigurationError(
+                    f"{assignment_id} 启用 template_metrics 必须配置 report_file 和 Markdown report_template"
+                )
     course = CourseConfiguration(data)
     for section_name, providers in (
         ("ai", course.ai_providers),

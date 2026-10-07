@@ -11,6 +11,7 @@ from . import __version__
 from .ai import BINARY_SUFFIXES, GlmAIReviewer
 from .config import CourseConfiguration, Student, StudentRoster
 from .exceptions import (
+    ConfigurationError,
     ContentLimitExceeded,
     InvalidStudentImage,
     ReviewSystemError,
@@ -20,6 +21,7 @@ from .path_utils import canonical_filename
 from .report_checks import required_address_issues
 from .review_time import review_time_context
 from .snapshot import PullRequestSnapshot
+from .template_metrics import check_template_metrics
 from .vision import GlmVisionReviewer
 
 TITLE_PATTERNS = {
@@ -494,6 +496,36 @@ def review_pull_request(
             ),
             _late_deadline_issues(
                 course, assignment, snapshot, close_allowed=True, metadata=metadata
+            ),
+        )
+
+    # Only explicitly opted-in assignments execute this gate. Never inherit it
+    # from defaults or change existing AI/consensus policies for other courses.
+    try:
+        metric_issues, metric_metadata = check_template_metrics(
+            course.assignments[assignment_id], snapshot, expected_prefix, github,
+        )
+    except (ConfigurationError, ReviewSystemError) as exc:
+        return ReviewResult(
+            decision=Decision.ERROR,
+            summary="模板数量检查未能完成，已暂停自动合并。",
+            issues=(_issue(
+                ReasonCode.CONFIG_ERROR if isinstance(exc, ConfigurationError) else ReasonCode.SERVICE_ERROR,
+                str(exc),
+            ),),
+            metadata=metadata,
+        )
+    if metric_metadata:
+        metadata["template_metrics"] = metric_metadata
+    if metric_issues:
+        return _attach_late(
+            ReviewResult(
+                decision=Decision.FAIL,
+                summary="模板数量检查未通过；后续 AI 文本和图片审核未执行。",
+                issues=tuple(metric_issues), metadata=metadata,
+            ),
+            _late_deadline_issues(
+                course, assignment, snapshot, close_allowed=True, metadata=metadata,
             ),
         )
 

@@ -45,6 +45,10 @@ features:
 - [`examples/course-review.yml`](examples/course-review.yml)
 - [`examples/students.yml`](examples/students.yml)
 
+新作业可选择启用 [Markdown 行数与字符数量检查（第一阶段）](docs/template-metrics.md)，
+配置示例见 [`examples/template-metrics.yml`](examples/template-metrics.yml)。
+该功能仅在具体作业的 `template_metrics.enabled: true` 时执行；旧课程无需改 YAML。
+
 ## 从 Excel 生成学生名单
 
 Excel 仅使用三列，第一行表头必须精确为：

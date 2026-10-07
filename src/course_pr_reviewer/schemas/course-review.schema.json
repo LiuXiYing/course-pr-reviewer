@@ -195,6 +195,23 @@
         "enabled": {"type": "boolean", "default": true},
         "deadline": {"type": "string", "format": "date-time"},
         "report_template": {"$ref": "#/$defs/relativeFile"},
+        "template_metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "properties": {
+            "enabled": {"type": "boolean", "default": false},
+            "report_file": {"$ref": "#/$defs/relativeFile"},
+            "max_file_bytes": {"type": "integer", "minimum": 1000, "maximum": 1000000, "default": 200000},
+            "characters": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 15,
+              "uniqueItems": true,
+              "items": {"enum": ["#", "-", "*", "`", "|", ">", "_", "[", "]", "(", ")", "!", "~", "+", "\\"]}
+            }
+          }
+        },
         "required_address_cells": {
           "type": "array",
           "maxItems": 100,

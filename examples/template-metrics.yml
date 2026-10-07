@@ -1,0 +1,30 @@
+# 完整的第一阶段配置示例。仅供新作业参考，不替换现有课程配置。
+version: 1
+course:
+  name: 模板数量检查示例
+  timezone: Asia/Shanghai
+features:
+  auto_merge: false
+  comment_review: true
+  close_late_pr: false
+  ai_review: true
+  ocr_review: false
+  vision_review: false
+  metrics: true
+assignments:
+  LabExisting:
+    deadline: "2026-10-08T23:59:59+08:00"
+    required_files: [LabExisting.md]
+    review_points: [按原有要求检查作业]
+    # 不配置 template_metrics，维持原行为。
+  LabFuture:
+    deadline: "2026-11-01T23:59:59+08:00"
+    report_template: homework/LabFuture/LabFuture.md
+    required_files: [LabFuture.md]
+    template_metrics:
+      enabled: true
+      report_file: LabFuture.md
+      characters: ['#', '-', '*', '`', '|', '>']
+      max_file_bytes: 200000
+    review_points:
+      - 此处替换为教师为新作业编写的实际验收要求。
