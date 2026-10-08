@@ -63,12 +63,12 @@ class StructuredOutputTests(unittest.TestCase):
         self.assertEqual(result["issues"][0]["evidence"], "填写：")
         self.assertEqual(self.client.complete.call_count, 2)
         original, corrected = [call.kwargs for call in self.client.complete.call_args_list]
-        self.assertEqual(original["messages"][0]["content"], self.system)
+        self.assertTrue(original["messages"][0]["content"].startswith(self.system))
         self.assertTrue(corrected["messages"][0]["content"].startswith(self.system))
         self.assertIn("issues.0.evidence", corrected["messages"][0]["content"])
         for request in (original, corrected):
             self.assertEqual(request["messages"][1]["content"], self.submission)
-            self.assertNotIn("2000", request["messages"][0]["content"])
+            self.assertNotIn("自称的当前年份", request["messages"][0]["content"])
             self.assertEqual(request["max_attempts"], 5)
         self.assertEqual(metadata["structured_output"]["corrections"], 1)
         self.assertEqual(metadata["total_tokens"], 240)
@@ -104,6 +104,73 @@ class StructuredOutputTests(unittest.TestCase):
                 self.assertEqual(result["decision"], decision)
                 self.client.complete.assert_called_once()
                 self.assertEqual(metadata["structured_output"]["corrections"], 0)
+
+    def test_long_evidence_is_preserved_for_text_and_image_reviews(self):
+        for schema_name, category in (
+            ("ai-review.schema.json", "CONTENT_VIOLATION"),
+            ("vision-review.schema.json", "VISUAL_VIOLATION"),
+        ):
+            self.schema = json.loads(
+                files("course_pr_reviewer").joinpath("schemas", schema_name)
+                .read_text(encoding="utf-8")
+            )
+            for length in (501, 2000):
+                with self.subTest(schema=schema_name, length=length):
+                    self.client.reset_mock()
+                    evidence = "表格原文🙂" * (length // 5) + "字" * (length % 5)
+                    self.client.complete.return_value = response(
+                        "FAIL", evidence=evidence, category=category,
+                    )
+                    result, metadata = self.complete()
+                    self.assertEqual(result["decision"], "FAIL")
+                    self.assertEqual(result["issues"][0]["evidence"], evidence)
+                    self.client.complete.assert_called_once()
+                    self.assertEqual(metadata["structured_output"]["corrections"], 0)
+
+    def test_evidence_above_the_new_limit_still_requires_regeneration(self):
+        self.client.complete.side_effect = [response("FAIL", evidence="字" * 2001), response("FAIL")]
+        with self.assertLogs("course_pr_reviewer.structured_output", level="WARNING"):
+            result, metadata = self.complete()
+        self.assertEqual(result["decision"], "FAIL")
+        self.assertEqual(result["issues"][0]["evidence"], "填写：")
+        self.assertIn("maxLength=2000", metadata["structured_output"]["validation_errors"][0])
+
+    def test_token_truncation_is_retried_even_when_the_json_looks_complete(self):
+        for content in (None, '{"decision":', response()["choices"][0]["message"]["content"]):
+            with self.subTest(content=content):
+                self.client.reset_mock()
+                truncated = response()
+                truncated["choices"][0].update(finish_reason="length", message={"content": content})
+                self.client.complete.side_effect = [truncated, response("FAIL")]
+                with self.assertLogs("course_pr_reviewer.structured_output", level="WARNING"):
+                    result, metadata = self.complete()
+                self.assertEqual(result["decision"], "FAIL")
+                self.assertEqual(self.client.complete.call_count, 2)
+                self.assertEqual(metadata["total_tokens"], 240)
+                self.assertIn("finish_reason=length", metadata["structured_output"]["validation_errors"][0])
+                for call in self.client.complete.call_args_list:
+                    self.assertEqual(call.kwargs["max_output_tokens"], 2048)
+                    self.assertEqual(call.kwargs["messages"][1]["content"], self.submission)
+
+    def test_repeated_token_truncation_fails_with_an_explicit_diagnosis(self):
+        truncated = response()
+        truncated["choices"][0]["finish_reason"] = "length"
+        self.client.complete.return_value = truncated
+        with self.assertLogs("course_pr_reviewer.structured_output", level="WARNING"):
+            with self.assertRaisesRegex(StructuredOutputError, "含 2 次自动纠正.*输出 token 上限"):
+                self.complete()
+        self.assertEqual(self.client.complete.call_count, 3)
+
+    def test_completed_response_records_finish_reason_and_length_instructions(self):
+        completed = response()
+        completed["choices"][0]["finish_reason"] = "stop"
+        self.client.complete.return_value = completed
+        _, metadata = self.complete()
+        self.assertEqual(metadata["finish_reason"], "stop")
+        prompt = self.client.complete.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("2000 个字符", prompt)
+        self.assertIn("2048 个输出 token", prompt)
+        self.assertIn("category、message、file、evidence、rule", prompt)
 
     def test_provider_errors_do_not_start_extra_format_attempts(self):
         for error in (ProviderConfigurationError, ProviderUnavailableError):
