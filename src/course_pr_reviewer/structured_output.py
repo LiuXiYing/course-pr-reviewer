@@ -50,6 +50,11 @@ def _response_metadata(response: dict[str, Any]) -> dict[str, Any]:
     response_id = response.get("id")
     if isinstance(response_id, str) and response_id:
         metadata["response_id"] = response_id
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        finish_reason = choices[0].get("finish_reason")
+        if finish_reason in ("stop", "length", "content_filter", "tool_calls", "function_call"):
+            metadata["finish_reason"] = finish_reason
     return metadata
 
 
@@ -60,6 +65,12 @@ def _reject_json_constant(value: str) -> None:
 def parse_api_response(
     response: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    metadata = _response_metadata(response)
+    if metadata.get("finish_reason") == "length":
+        raise StructuredOutputError(
+            "AI 输出达到输出 token 上限而被截断（finish_reason=length），"
+            "请精简说明并返回完整 JSON；持续截断时需检查 max_output_tokens 配置"
+        )
     try:
         content = response["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
@@ -74,7 +85,7 @@ def parse_api_response(
         raise StructuredOutputError("AI message.content 不是有效 JSON") from exc
     if not isinstance(parsed, dict):
         raise StructuredOutputError("AI message.content 顶层必须是 JSON 对象")
-    return parsed, _response_metadata(response)
+    return parsed, metadata
 
 
 def complete_structured_output(
@@ -94,10 +105,19 @@ def complete_structured_output(
     evidence. Each attempt receives the same original submission and review rules.
     """
     validator = Draft202012Validator(schema)
+    evidence_limit = schema["properties"]["issues"]["items"]["properties"]["evidence"]["maxLength"]
+    length_prompt = (
+        f"\n完整 JSON 必须控制在本次 {settings['max_output_tokens']} 个输出 token 内。"
+        "summary、message 和 rule 使用简短说明，避免重复大段审核规则。"
+        f"每条 evidence 最多 {evidence_limit} 个字符，通常只需 100 至 300 字符，"
+        "能用更短证据说明问题时不必凑字数；避免引用整张表格或无关章节。"
+        "证据必须保留能说明问题的关键上下文，不得为缩短输出删去未解决的问题。"
+        "每条 issue 必须包含 category、message、file、evidence、rule 全部字段。"
+    )
     failures: list[str] = []
     totals: dict[str, int] = {}
     for correction in range(MAX_OUTPUT_CORRECTIONS + 1):
-        prompt = system_prompt
+        prompt = system_prompt + length_prompt
         if failures:
             prompt += (
                 f"\n第 {correction}/{MAX_OUTPUT_CORRECTIONS} 次输出格式纠正。"

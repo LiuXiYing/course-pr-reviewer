@@ -489,6 +489,26 @@ class GlmAIReviewerTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewSystemError, "Schema"):
             reviewer.review(self.course, "Lab1", self.snapshot)
 
+    def test_long_table_evidence_survives_schema_and_source_verification(self):
+        evidence = "| 检查项 | 本人输出 |\n" + "| 实验记录 | 尚未填写 |\n" * 40
+        self.assertGreater(len(evidence), 500)
+        snapshot = replace(
+            self.snapshot,
+            files=(ChangedFile(self.path, "added", content="# Lab1\n" + evidence),),
+        )
+        issue = {
+            "category": "CONTENT_VIOLATION", "message": "实验记录尚未填写",
+            "file": self.path, "evidence": evidence, "rule": "填写实验记录",
+        }
+        for client_type in (GlmClient, GeminiClient):
+            with self.subTest(provider=client_type.__name__):
+                transport = FakeTransport(model_result("FAIL", issues=[issue]))
+                reviewer = GlmAIReviewer(client_type("test-key", transport=transport))
+                outcome = reviewer.review(self.course, "Lab1", snapshot)
+                self.assertEqual(outcome.decision, Decision.FAIL)
+                self.assertEqual(outcome.issues[0].evidence, evidence)
+                self.assertEqual(len(transport.calls), 1)
+
     def test_both_providers_correct_empty_evidence_before_consensus(self):
         issue = {
             "category": "CONTENT_VIOLATION", "message": "遍历结果不正确",
