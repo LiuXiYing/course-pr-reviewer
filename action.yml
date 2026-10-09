@@ -33,21 +33,21 @@ inputs:
     description: Gemini API key; required when a review provider is gemini
     required: false
   teacher-email:
-    description: Teacher email notified only for MANUAL_REVIEW or ERROR
+    description: Deprecated and ignored; email notifications are disabled
     required: false
   smtp-host:
-    description: SMTP SSL host used for teacher notifications
+    description: Deprecated and ignored; email notifications are disabled
     required: false
     default: smtp.gmail.com
   smtp-port:
-    description: SMTP SSL port used for teacher notifications
+    description: Deprecated and ignored; email notifications are disabled
     required: false
     default: "465"
   smtp-username:
-    description: SMTP login and From address
+    description: Deprecated and ignored; email notifications are disabled
     required: false
   smtp-password:
-    description: SMTP password or app password
+    description: Deprecated and ignored; email notifications are disabled
     required: false
 
 outputs:
@@ -94,11 +94,6 @@ runs:
         MERGE_TOKEN: ${{ inputs.merge-token }}
         GLM_API_KEY: ${{ inputs.glm-api-key }}
         GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
-        TEACHER_EMAIL: ${{ inputs.teacher-email }}
-        SMTP_HOST: ${{ inputs.smtp-host }}
-        SMTP_PORT: ${{ inputs.smtp-port }}
-        SMTP_USERNAME: ${{ inputs.smtp-username }}
-        SMTP_PASSWORD: ${{ inputs.smtp-password }}
       run: |
         set +e
         course-pr-reviewer review \
@@ -108,17 +103,10 @@ runs:
           --result-file review-result.json
         review_status=$?
 
-        course-pr-reviewer notify \
-          --config "$COURSE_REVIEW_CONFIG" \
-          --result-file review-result.json
-        notify_status=$?
         set -e
 
         course-pr-reviewer publish \
           --config "$COURSE_REVIEW_CONFIG" \
           --result-file review-result.json
 
-        if [[ "$review_status" -ne 0 ]]; then
-          exit "$review_status"
-        fi
-        exit "$notify_status"
+        exit "$review_status"

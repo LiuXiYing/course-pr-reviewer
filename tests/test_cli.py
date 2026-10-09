@@ -62,68 +62,61 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, 0)
 
-    def test_notify_skips_pass_without_smtp_configuration(self):
-        with tempfile.TemporaryDirectory() as directory:
-            result_path = Path(directory) / "result.json"
-            self._review_result(result_path, Decision.PASS)
-            with patch.dict(os.environ, {}, clear=True):
-                exit_code = main(
-                    [
-                        "notify",
-                        "--config",
-                        str(ROOT / "examples/course-review.yml"),
-                        "--result-file",
-                        str(result_path),
-                    ]
-                )
-        self.assertEqual(exit_code, 0)
-
-    @patch("course_pr_reviewer.cli.TeacherEmailNotifier")
-    def test_notify_marks_manual_review_after_email(self, notifier):
-        with tempfile.TemporaryDirectory() as directory:
-            result_path = Path(directory) / "result.json"
-            self._review_result(result_path, Decision.MANUAL_REVIEW)
-            environment = {
+    @patch("smtplib.SMTP_SSL")
+    def test_notify_is_disabled_for_every_decision_with_or_without_credentials(self, smtp):
+        environments = [
+            {},
+            {
                 "TEACHER_EMAIL": "teacher@example.com",
                 "SMTP_USERNAME": "sender@example.com",
                 "SMTP_PASSWORD": "secret",
-                "GITHUB_REPOSITORY": "teacher/course",
-                "GITHUB_RUN_ID": "123",
-            }
-            with patch.dict(os.environ, environment, clear=True):
-                exit_code = main(
-                    [
-                        "notify",
-                        "--config",
-                        str(ROOT / "examples/course-review.yml"),
-                        "--result-file",
-                        str(result_path),
-                    ]
-                )
-            result = json.loads(result_path.read_text(encoding="utf-8"))
+                "SMTP_PORT": "465",
+            },
+            {"SMTP_PORT": "invalid-port"},
+        ]
+        for decision in Decision:
+            for environment in environments:
+                with self.subTest(decision=decision, configured=bool(environment)):
+                    with tempfile.TemporaryDirectory() as directory:
+                        result_path = Path(directory) / "result.json"
+                        self._review_result(result_path, decision)
+                        original = result_path.read_bytes()
+                        output = io.StringIO()
+                        with patch.dict(os.environ, environment, clear=True), redirect_stdout(output):
+                            exit_code = main([
+                                "notify", "--config", str(ROOT / "examples/course-review.yml"),
+                                "--result-file", str(result_path),
+                            ])
+                        self.assertEqual(exit_code, 0)
+                        self.assertEqual(json.loads(output.getvalue()), {"email": "disabled"})
+                        self.assertEqual(result_path.read_bytes(), original)
+        smtp.assert_not_called()
 
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(result["metadata"]["teacher_email_notification"], "sent")
-        notifier.return_value.send.assert_called_once()
-
-    def test_notify_records_missing_smtp_configuration(self):
+    def test_notify_ignores_missing_config_and_result_after_review_failure(self):
         with tempfile.TemporaryDirectory() as directory:
-            result_path = Path(directory) / "result.json"
-            self._review_result(result_path, Decision.ERROR)
-            with patch.dict(os.environ, {}, clear=True):
-                exit_code = main(
-                    [
-                        "notify",
-                        "--config",
-                        str(ROOT / "examples/course-review.yml"),
-                        "--result-file",
-                        str(result_path),
-                    ]
-                )
-            result = json.loads(result_path.read_text(encoding="utf-8"))
+            config_path = Path(directory) / "missing.yml"
+            result_path = Path(directory) / "missing.json"
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = main([
+                    "notify", "--config", str(config_path), "--result-file", str(result_path),
+                ])
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(json.loads(output.getvalue()), {"email": "disabled"})
+            self.assertFalse(result_path.exists())
 
-        self.assertEqual(exit_code, 2)
-        self.assertEqual(result["metadata"]["teacher_email_notification"], "failed")
+    def test_notify_ignores_invalid_config_and_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "invalid.yml"
+            result_path = Path(directory) / "invalid.json"
+            config_path.write_text("[invalid config")
+            result_path.write_text("not JSON")
+            with redirect_stdout(io.StringIO()):
+                exit_code = main([
+                    "notify", "--config", str(config_path), "--result-file", str(result_path),
+                ])
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(result_path.read_text(), "not JSON")
 
     def test_review_fails_closed_when_ai_key_is_missing(self):
         with tempfile.TemporaryDirectory() as directory:
