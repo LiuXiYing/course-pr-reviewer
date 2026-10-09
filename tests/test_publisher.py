@@ -383,7 +383,7 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("GLM", body)
         self.assertIn("降级运行", body)
 
-    def test_comment_confirms_successful_teacher_email(self):
+    def test_comment_does_not_repeat_legacy_email_sent_status(self):
         body = render_comment(
             result_dict(
                 Decision.MANUAL_REVIEW,
@@ -391,7 +391,7 @@ class PublisherTests(unittest.TestCase):
                 metadata={"teacher_email_notification": "sent"},
             )
         )
-        self.assertIn("已通过邮件发送给任课教师", body)
+        self.assertNotIn("邮件", body)
 
     def test_comment_distinguishes_exhausted_disagreement_from_early_agreement(self):
         body = render_comment(result_dict(metadata={
@@ -408,7 +408,7 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("已审核 1 轮，最多 3 轮", body)
         self.assertEqual(body.count("达到复核上限仍有分歧，按规则通过"), 1)
 
-    def test_comment_does_not_claim_email_when_sending_failed(self):
+    def test_comment_does_not_request_repairs_for_disabled_email(self):
         body = render_comment(
             result_dict(
                 Decision.ERROR,
@@ -416,8 +416,7 @@ class PublisherTests(unittest.TestCase):
                 metadata={"teacher_email_notification": "failed"},
             )
         )
-        self.assertIn("邮件通知任课教师失败", body)
-        self.assertNotIn("已通过邮件发送给任课教师", body)
+        self.assertNotIn("邮件", body)
 
     def test_result_file_is_schema_validated(self):
         with tempfile.TemporaryDirectory() as directory:
