@@ -22,6 +22,34 @@ COMMENT_MARKER = "<!-- course-pr-reviewer -->"
 MAX_RESULT_BYTES = 1_000_000
 MAX_COMMENT_CHARS = 60_000
 
+# 只有这些原因代码可以驱动自动关闭 PR：超期关闭、作业已合并的重复提交关闭。
+CLOSE_REASON_CODES = frozenset(
+    {
+        ReasonCode.LATE_PR_CLOSE_REQUIRED.value,
+        ReasonCode.ALREADY_MERGED_CLOSE_REQUIRED.value,
+    }
+)
+MERGED_DUPLICATE_HEADING = "## 该作业已合并，本 PR 是重复提交，已自动关闭 🔁"
+HEADINGS = {
+    Decision.PASS: "PR 自动审核通过 ✅",
+    Decision.FAIL: "PR 自动审核未通过 ❌",
+    Decision.MANUAL_REVIEW: "PR 无法自动确认 ⚠️",
+    Decision.ERROR: "PR 审核系统错误 🚨",
+}
+
+
+def _is_merged_duplicate(result: dict[str, Any]) -> bool:
+    return ReasonCode.ALREADY_MERGED_CLOSE_REQUIRED.value in result.get(
+        "reason_codes", []
+    )
+
+
+def _heading(result: dict[str, Any], decision: Decision) -> str:
+    """重复提交的关闭要一眼看出来，不混在普通 FAIL 里。"""
+    if _is_merged_duplicate(result):
+        return MERGED_DUPLICATE_HEADING
+    return f"## {HEADINGS[decision]}"
+
 
 @dataclass(frozen=True)
 class PublicationOutcome:
@@ -143,13 +171,7 @@ def _feedback_lines(result: dict[str, Any]) -> list[str]:
 
 def render_comment(result: dict[str, Any]) -> str:
     decision = Decision(result["decision"])
-    headings = {
-        Decision.PASS: "PR 自动审核通过 ✅",
-        Decision.FAIL: "PR 自动审核未通过 ❌",
-        Decision.MANUAL_REVIEW: "PR 无法自动确认 ⚠️",
-        Decision.ERROR: "PR 审核系统错误 🚨",
-    }
-    lines = [COMMENT_MARKER, f"## {headings[decision]}"]
+    lines = [COMMENT_MARKER, _heading(result, decision)]
     feedback_lines = _feedback_lines(result)
     if feedback_lines:
         lines.extend(feedback_lines)
@@ -210,11 +232,16 @@ def render_comment(result: dict[str, Any]) -> str:
                     f"  - 证据：{_safe_markdown_with_code(item['evidence'])}"
                 )
     head_sha = result.get("metadata", {}).get("head_sha", "")
+    tail = (
+        "该作业已经合并，本次没有执行内容审核；如需重新提交，请先联系教师。"
+        if _is_merged_duplicate(result)
+        else "新提交会重新触发审核。"
+    )
     lines.extend(
         [
             "",
             "---",
-            f"审核提交：{_inline_code(str(head_sha)[:12])}。新提交会重新触发审核。",
+            f"审核提交：{_inline_code(str(head_sha)[:12])}。{tail}",
         ]
     )
     body = "\n".join(lines)
@@ -269,6 +296,15 @@ class GitHubResultPublisher:
     def _is_same_head(pr: dict[str, Any], head_sha: str) -> bool:
         return str(pr.get("head", {}).get("sha", "")).lower() == head_sha
 
+    @staticmethod
+    def _close_allowed(
+        course: CourseConfiguration, reason_codes: set[str]
+    ) -> bool:
+        """重复提交（作业已合并）的关闭是课程既定规则，不受 close_late_pr 影响。"""
+        if ReasonCode.ALREADY_MERGED_CLOSE_REQUIRED.value in reason_codes:
+            return True
+        return course.feature_enabled("close_late_pr")
+
     def _create_comment(self, repository: str, number: int, body: str) -> None:
         repo = urllib.parse.quote(repository, safe="/")
         self.github.post_json(
@@ -296,9 +332,9 @@ class GitHubResultPublisher:
         close_requested = bool(result["metadata"].get("close_pr"))
         if close_requested and (
             result["decision"] != Decision.FAIL.value
-            or ReasonCode.LATE_PR_CLOSE_REQUIRED.value not in reason_codes
+            or not reason_codes.intersection(CLOSE_REASON_CODES)
         ):
-            raise ReviewSystemError("自动关闭请求缺少超期关闭原因代码")
+            raise ReviewSystemError("自动关闭请求缺少关闭原因代码")
         if state != "open":
             return PublicationOutcome(
                 skipped="already_closed" if close_requested else "pr_not_open"
@@ -310,7 +346,7 @@ class GitHubResultPublisher:
             commented = True
 
         repo = urllib.parse.quote(repository, safe="/")
-        if close_requested and course.feature_enabled("close_late_pr"):
+        if close_requested and self._close_allowed(course, reason_codes):
             latest = self._current_pr(repository, number)
             if not self._is_same_head(latest, head_sha):
                 return PublicationOutcome(commented=commented, skipped="head_changed")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import re
 import string
 from pathlib import PurePosixPath
@@ -30,6 +31,8 @@ TITLE_PATTERNS = {
     "student_identity": r"(?P<student_identity>.+?)",
     "assignment_id": r"(?P<assignment_id>[A-Za-z][A-Za-z0-9_-]{0,49})",
 }
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _title_regex(template: str) -> re.Pattern[str]:
@@ -68,6 +71,41 @@ def _configured_assignment_for_path(
         if canonical_filename(filename).startswith(canonical_filename(prefix)):
             return assignment_id
     return None
+
+
+def _already_merged_issue(
+    course: CourseConfiguration,
+    student: Student,
+    assignment_id: str,
+    snapshot: PullRequestSnapshot,
+    github,
+) -> Issue | None:
+    """标题里已确认的作业编号，是否已经在目标分支上合并过。
+
+    只查这个学生这个作业的提交目录：目录存在就说明这份作业此前已经合并，本次
+    PR 是重复提交。缺少 GitHub 客户端或基础分支 SHA、以及查询失败时都不下结论，
+    交回正常审核——宁可多审一份重复提交，也不能误关学生的 PR。
+    """
+    if github is None or snapshot.base_sha is None:
+        return None
+    directory = course.expected_submission_dir(student, assignment_id)
+    try:
+        present = github.path_present(
+            snapshot.repository, directory, snapshot.base_sha
+        )
+    except ReviewSystemError as exc:
+        LOGGER.warning("重复提交检查未完成（%s）", type(exc).__name__)
+        return None
+    if present is not True:
+        # 只有明确的“存在”才算已合并：其他返回值都当作无法确认，交回正常审核，
+        # 宁可多审一份重复提交，也不能误关学生的 PR。
+        return None
+    return _issue(
+        ReasonCode.ALREADY_MERGED_CLOSE_REQUIRED,
+        f"目标分支（`{snapshot.base_sha[:12]}`）上已经有 {directory}/ 这个目录："
+        f"本次 {assignment_id} 作业此前已经合并，本 PR 是重复提交，不再重复审核。"
+        "如需修改或补交，请先联系教师确认。",
+    )
 
 
 def _required_file_issues(assignment: dict, submitted: set[str]) -> list[Issue]:
@@ -428,6 +466,23 @@ def review_pull_request(
             _late_deadline_issues(
                 course, assignment, snapshot, close_allowed=True, metadata=metadata
             ),
+        )
+
+    # 标题里的作业编号已经确认，先查这份作业是不是已经合并过：是的话没有审核的
+    # 必要，直接说明是重复提交并关闭 PR（不需要再看文件和截止时间）。
+    merged_issue = _already_merged_issue(
+        course, student, assignment_id, snapshot, github
+    )
+    if merged_issue is not None:
+        metadata["close_pr"] = True
+        return ReviewResult(
+            decision=Decision.FAIL,
+            summary=(
+                f"标题中的 {assignment_id} 作业已经合并到目标分支，"
+                "本 PR 属于重复提交，不再审核，已自动关闭。"
+            ),
+            issues=(merged_issue,),
+            metadata=metadata,
         )
 
     expected_dir = course.expected_submission_dir(student, assignment_id)

@@ -173,6 +173,55 @@ class PublisherTests(unittest.TestCase):
         )
         self.assertEqual(github.put_calls, [])
 
+    def test_merged_duplicate_comments_then_closes_without_auto_merge(self):
+        data = copy.deepcopy(self.course.data)
+        data["features"]["close_late_pr"] = False
+        issue = Issue(
+            code=ReasonCode.ALREADY_MERGED_CLOSE_REQUIRED,
+            message="`2023010102刘西莹/Lab1/` 已经存在于目标分支：本次 Lab1 作业此前已经合并。",
+        )
+        github = FakeGitHub()
+        outcome = GitHubResultPublisher(github).publish(
+            CourseConfiguration(data),
+            result_dict(
+                Decision.FAIL, issues=(issue,), metadata={"close_pr": True},
+            ),
+            expected_repository="teacher/course",
+        )
+        self.assertTrue(outcome.commented)
+        self.assertTrue(outcome.closed)
+        self.assertEqual(
+            github.patch_calls[-1],
+            ("/repos/teacher/course/pulls/7", {"state": "closed"}),
+        )
+        self.assertEqual(github.put_calls, [])
+        body = github.post_calls[0][1]["body"]
+        self.assertIn("该作业已合并", body)
+        self.assertIn("已自动关闭", body)
+        self.assertNotIn("PR 自动审核未通过", body)
+
+    def test_merged_duplicate_comment_is_not_rendered_as_a_plain_fail(self):
+        issue = Issue(code=ReasonCode.ALREADY_MERGED_CLOSE_REQUIRED, message="已合并")
+        body = render_comment(result_dict(Decision.FAIL, issues=(issue,)))
+        self.assertTrue(body.startswith(COMMENT_MARKER))
+        self.assertIn("## 该作业已合并", body)
+        self.assertIn("`ALREADY_MERGED_CLOSE_REQUIRED`", body)
+        self.assertIn("没有执行内容审核", body)
+        self.assertNotIn("新提交会重新触发审核", body)
+
+    def test_merged_duplicate_flag_is_still_rejected_for_other_decisions(self):
+        issue = Issue(code=ReasonCode.ALREADY_MERGED_CLOSE_REQUIRED, message="已合并")
+        with self.assertRaisesRegex(ReviewSystemError, "关闭原因代码"):
+            GitHubResultPublisher(FakeGitHub()).publish(
+                self.course,
+                result_dict(
+                    Decision.MANUAL_REVIEW,
+                    issues=(issue,),
+                    metadata={"close_pr": True},
+                ),
+                expected_repository="teacher/course",
+            )
+
     def test_changed_head_skips_all_mutations(self):
         github = FakeGitHub(head_sha="b" * 40)
         outcome = GitHubResultPublisher(github).publish(
@@ -209,7 +258,7 @@ class PublisherTests(unittest.TestCase):
 
     def test_close_flag_without_late_reason_is_rejected(self):
         issue = Issue(code=ReasonCode.DEADLINE_EXCEEDED, message="仅轻微超期")
-        with self.assertRaisesRegex(ReviewSystemError, "超期关闭原因"):
+        with self.assertRaisesRegex(ReviewSystemError, "关闭原因代码"):
             GitHubResultPublisher(FakeGitHub()).publish(
                 self.course,
                 result_dict(

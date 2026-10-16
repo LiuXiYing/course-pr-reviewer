@@ -719,5 +719,157 @@ class LateSubmissionOrderTests(unittest.TestCase):
         self.assertNotIn("close_pr", result.metadata)
 
 
+class FakeDirectoryGitHub:
+    """只回答"目标分支上有没有这个提交目录"的替身。"""
+
+    def __init__(self, present=True, error=None):
+        self.present = present
+        self.error = error
+        self.calls = []
+
+    def path_present(self, repository, path, ref):
+        self.calls.append((repository, path, ref))
+        if self.error is not None:
+            raise self.error
+        return self.present
+
+
+class MergedDuplicateTests(unittest.TestCase):
+    """标题里的作业编号确认后，先查这份作业是不是已经合并过。
+
+    已合并就判重复提交：说明清楚并关闭 PR，不再调用 AI；标题或身份不合规、
+    拿不到基础分支 SHA、查询失败时一律不下这个结论，交回正常审核。
+    """
+
+    def setUp(self):
+        loaded = load_course_config(ROOT / "examples/course-review.yml")
+        data = copy.deepcopy(loaded.data)
+        data["features"].update(
+            ai_review=True, vision_review=True, close_late_pr=False
+        )
+        data["assignments"]["Lab1"]["deadline"] = "2099-09-20T23:59:59+08:00"
+        self.course = CourseConfiguration(data)
+        self.roster = load_student_roster(ROOT / "examples/students.yml")
+
+    def snapshot(self, **overrides):
+        values = {
+            "repository": "teacher/course",
+            "number": 119,
+            "title": "[2023010102刘西莹]Lab1作业提交",
+            "author_login": "example-user",
+            "captured_head_sha": SHA,
+            "current_head_sha": SHA,
+            "base_sha": "c" * 40,
+            "event_at": dt.datetime(
+                2026, 9, 1, tzinfo=dt.timezone(dt.timedelta(hours=8))
+            ),
+            "files": (
+                ChangedFile("2023010102刘西莹/Lab1/Lab1.md", "added"),
+                ChangedFile("2023010102刘西莹/Lab1/result.png", "added"),
+            ),
+        }
+        values.update(overrides)
+        return PullRequestSnapshot(**values)
+
+    def passing_reviewer(self):
+        reviewer = Mock()
+        reviewer.review.return_value = AIOutcome(
+            decision=Decision.PASS, summary="通过", confidence=1.0,
+        )
+        return reviewer
+
+    def codes(self, result):
+        return {issue.code for issue in result.issues}
+
+    def test_merged_lab_is_closed_without_any_ai_review(self):
+        github = FakeDirectoryGitHub(present=True)
+        ai, vision = self.passing_reviewer(), self.passing_reviewer()
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(), ai, vision, github
+        )
+        self.assertEqual(result.decision, Decision.FAIL)
+        self.assertEqual(result.reason_codes, ("ALREADY_MERGED_CLOSE_REQUIRED",))
+        self.assertTrue(result.metadata["close_pr"])
+        self.assertIn("重复提交", result.summary)
+        message = result.issues[0].message
+        self.assertIn("2023010102刘西莹/Lab1/", message)
+        self.assertIn("此前已经合并", message)
+        self.assertIn("c" * 12, message)
+        ai.review.assert_not_called()
+        vision.review.assert_not_called()
+        self.assertEqual(
+            github.calls, [("teacher/course", "2023010102刘西莹/Lab1", "c" * 40)]
+        )
+
+    def test_absent_directory_keeps_the_normal_review(self):
+        github = FakeDirectoryGitHub(present=False)
+        ai, vision = self.passing_reviewer(), self.passing_reviewer()
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(), ai, vision, github
+        )
+        self.assertEqual(result.decision, Decision.PASS)
+        self.assertNotIn("close_pr", result.metadata)
+        ai.review.assert_called_once()
+        vision.review.assert_called_once()
+
+    def test_unconfirmed_title_or_assignment_never_reaches_the_check(self):
+        github = FakeDirectoryGitHub(present=True)
+        cases = (
+            ("Lab1", ReasonCode.TITLE_MISMATCH),
+            ("[2023010103张三]Lab1作业提交", ReasonCode.IDENTITY_MISMATCH),
+            ("[2023010102刘西莹]Lab99作业提交", ReasonCode.ASSIGNMENT_NOT_CONFIGURED),
+        )
+        for title, code in cases:
+            with self.subTest(title=title):
+                result = review_pull_request(
+                    self.course, self.roster, self.snapshot(title=title),
+                    github=github,
+                )
+                self.assertIn(code, self.codes(result))
+                self.assertNotIn(ReasonCode.ALREADY_MERGED_CLOSE_REQUIRED, self.codes(result))
+                self.assertNotIn("close_pr", result.metadata)
+        self.assertEqual(github.calls, [])
+
+    def test_unknown_base_commit_skips_the_check(self):
+        github = FakeDirectoryGitHub(present=True)
+        ai, vision = self.passing_reviewer(), self.passing_reviewer()
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(base_sha=None), ai, vision, github
+        )
+        self.assertEqual(result.decision, Decision.PASS)
+        self.assertEqual(github.calls, [])
+
+    def test_detection_requires_a_github_client(self):
+        ai, vision = self.passing_reviewer(), self.passing_reviewer()
+        result = review_pull_request(
+            self.course, self.roster, self.snapshot(), ai, vision
+        )
+        self.assertEqual(result.decision, Decision.PASS)
+        self.assertNotIn("close_pr", result.metadata)
+
+    def test_unavailable_lookup_falls_back_to_the_normal_review(self):
+        github = FakeDirectoryGitHub(error=ReviewSystemError("HTTP 403"))
+        ai, vision = self.passing_reviewer(), self.passing_reviewer()
+        with self.assertLogs("course_pr_reviewer.reviewer", level="WARNING"):
+            result = review_pull_request(
+                self.course, self.roster, self.snapshot(), ai, vision, github
+            )
+        self.assertEqual(result.decision, Decision.PASS)
+        self.assertNotIn("close_pr", result.metadata)
+        ai.review.assert_called_once()
+
+    def test_merged_duplicate_needs_no_deadline_judgement(self):
+        github = FakeDirectoryGitHub(present=True)
+        result = review_pull_request(
+            self.course,
+            self.roster,
+            self.snapshot(event_at=dt.datetime(2100, 1, 1, tzinfo=dt.UTC)),
+            github=github,
+        )
+        self.assertEqual(result.reason_codes, ("ALREADY_MERGED_CLOSE_REQUIRED",))
+        self.assertNotIn("late_seconds", result.metadata)
+        self.assertTrue(result.metadata["close_pr"])
+
+
 if __name__ == "__main__":
     unittest.main()

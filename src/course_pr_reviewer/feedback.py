@@ -298,6 +298,8 @@ def add_ai_feedback(
         or not course.feature_enabled("comment_review")
         or result.decision is Decision.PASS
         or ReasonCode.STALE_HEAD_SHA.value in result.reason_codes
+        # 重复提交的结论已经写清楚，没必要再花一次模型调用解释。
+        or ReasonCode.ALREADY_MERGED_CLOSE_REQUIRED.value in result.reason_codes
         or snapshot.captured_head_sha != snapshot.current_head_sha
     ):
         return result

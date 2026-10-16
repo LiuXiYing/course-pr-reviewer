@@ -154,6 +154,7 @@ class GitHubClient:
         *,
         body: dict[str, Any] | None = None,
         expected: tuple[int, ...] = (200,),
+        allow_missing: bool = False,
     ) -> Any:
         encoded_body = (
             json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -185,6 +186,8 @@ class GitHubClient:
                     return None
                 return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            if allow_missing and exc.code == 404:
+                return None
             try:
                 detail = exc.read(501).decode("utf-8", errors="replace")
             except OSError:
@@ -197,8 +200,8 @@ class GitHubClient:
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             raise ReviewSystemError(f"GitHub API 请求失败：{exc}") from exc
 
-    def get_json(self, path: str) -> Any:
-        return self.request_json("GET", path)
+    def get_json(self, path: str, *, allow_missing: bool = False) -> Any:
+        return self.request_json("GET", path, allow_missing=allow_missing)
 
     def post_json(self, path: str, body: dict[str, Any]) -> Any:
         return self.request_json("POST", path, body=body, expected=(200, 201))
@@ -309,6 +312,21 @@ class GitHubClient:
         ):
             raise ReviewSystemError("官方报告模板必须指向 GitHub 中的普通文件")
         return self.text_blob(repository, entry["sha"], max_bytes=max_bytes)
+
+    def path_present(self, repository: str, path: str, ref: str) -> bool:
+        """目标分支的某个提交上是否已有这个路径（404 视为不存在）。
+
+        用 contents API 单次查询：返回目录列表或文件对象都算存在。空目录在 Git
+        里不存在，所以"路径存在"等价于"里面已经有文件"。
+        """
+        if not _safe_file_path(path) or not SHA_RE.fullmatch(ref):
+            raise ReviewSystemError("提交目录路径或目标分支 SHA 无效")
+        repo = urllib.parse.quote(repository, safe="/")
+        filename = urllib.parse.quote(path, safe="/")
+        entry = self.get_json(
+            f"/repos/{repo}/contents/{filename}?ref={ref}", allow_missing=True
+        )
+        return entry is not None
 
 
 def load_snapshot(

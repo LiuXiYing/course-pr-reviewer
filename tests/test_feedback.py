@@ -199,6 +199,8 @@ class FeedbackTests(unittest.TestCase):
             ReasonCode.STALE_HEAD_SHA,
             ReasonCode.TITLE_MISMATCH,
             ReasonCode.ASSIGNMENT_NOT_CONFIGURED,
+            # 重复提交（作业已合并）的结论已经写清楚，不再花模型调用解释。
+            ReasonCode.ALREADY_MERGED_CLOSE_REQUIRED,
         }]
         for code in [*codes, FutureReason.FUTURE_COURSE_RULE]:
             with self.subTest(code=code):
@@ -450,6 +452,15 @@ class FeedbackTests(unittest.TestCase):
         for course, snapshot, result in cases:
             with self.subTest(decision=result.decision, features=course.data["features"]):
                 self.assertIs(add_ai_feedback(course, self.roster, snapshot, result, factory), result)
+        factory.assert_not_called()
+
+    def test_merged_duplicate_close_needs_no_model_explanation(self):
+        original = self.result(ReasonCode.ALREADY_MERGED_CLOSE_REQUIRED)
+        factory = Mock(side_effect=AssertionError("duplicate close must not call AI"))
+        self.assertIs(
+            add_ai_feedback(self.course, self.roster, self.snapshot, original, factory),
+            original,
+        )
         factory.assert_not_called()
 
     def test_context_failure_leaves_original_result_available(self):

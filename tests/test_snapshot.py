@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import io
 import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -136,6 +138,39 @@ class SnapshotTests(unittest.TestCase):
                     client.text_file("teacher/course", "homework/Lab1", "c" * 40, max_bytes=1000)
         with self.assertRaises(ReviewSystemError):
             client.text_file("teacher/course", "homework/Lab1/", "c" * 40, max_bytes=1000)
+
+    def test_path_present_queries_the_base_commit_and_treats_404_as_absent(self):
+        client = GitHubClient("token")
+        with patch.object(client, "get_json", return_value=None) as call:
+            self.assertFalse(
+                client.path_present(
+                    "teacher/course", "2023010102刘西莹/Lab1", "c" * 40
+                )
+            )
+        call.assert_called_once_with(
+            "/repos/teacher/course/contents/"
+            "2023010102%E5%88%98%E8%A5%BF%E8%8E%B9/Lab1?ref=" + "c" * 40,
+            allow_missing=True,
+        )
+        with patch.object(client, "get_json", return_value=[{"name": "Lab1.md"}]):
+            self.assertTrue(
+                client.path_present(
+                    "teacher/course", "2023010102刘西莹/Lab1", "c" * 40
+                )
+            )
+        for path, ref in (("../secret", "c" * 40), ("2023010102刘西莹/Lab1", "main")):
+            with self.subTest(path=path, ref=ref), self.assertRaises(ReviewSystemError):
+                client.path_present("teacher/course", path, ref)
+
+    @patch("course_pr_reviewer.snapshot.urllib.request.urlopen")
+    def test_404_is_swallowed_only_when_explicitly_allowed(self, urlopen):
+        urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.github.com/x", 404, "Not Found", {}, io.BytesIO(b"{}")
+        )
+        client = GitHubClient("token")
+        self.assertIsNone(client.get_json("/x", allow_missing=True))
+        with self.assertRaisesRegex(ReviewSystemError, "HTTP 404"):
+            client.get_json("/x")
 
     @patch("course_pr_reviewer.snapshot.GitHubClient.changed_files")
     @patch("course_pr_reviewer.snapshot.GitHubClient.pull_request")
