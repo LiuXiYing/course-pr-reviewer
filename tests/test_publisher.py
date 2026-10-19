@@ -455,7 +455,26 @@ class PublisherTests(unittest.TestCase):
         }))
         self.assertIn("已审核 3 轮，最多 3 轮", body)
         self.assertIn("已审核 1 轮，最多 3 轮", body)
-        self.assertEqual(body.count("达到复核上限仍有分歧，按规则通过"), 1)
+        self.assertEqual(body.count("至少一方 PASS，按规则通过"), 1)
+        self.assertNotIn("不自动合并", body)
+
+    def test_comment_marks_exhausted_disagreement_without_pass_as_blocked(self):
+        body = render_comment(result_dict(
+            Decision.FAIL,
+            issues=(Issue(code=ReasonCode.AI_REJECTED, message="存在明确问题"),),
+            metadata={
+                "vision_consensus": {
+                    "rounds_used": 3,
+                    "max_rounds": 3,
+                    "disagreement_pass": False,
+                    "disagreement_blocked": True,
+                    "provider_decisions": {"glm": "MANUAL_REVIEW", "gemini": "FAIL"},
+                },
+            },
+        ))
+        self.assertIn("已审核 3 轮，最多 3 轮", body)
+        self.assertIn("达到复核上限仍无 PASS，不自动合并", body)
+        self.assertNotIn("按规则通过", body)
 
     def test_comment_does_not_request_repairs_for_disabled_email(self):
         body = render_comment(

@@ -144,14 +144,12 @@ class ConsensusTests(unittest.TestCase):
         self.assertEqual(len(glm.calls), 2)
         self.assertEqual(result.metadata["consensus"]["max_rounds"], 2)
 
-    def test_every_mixed_decision_pair_is_downweighted_to_pass(self):
+    def test_mixed_decision_passes_only_when_one_side_says_pass(self):
         pairs = (
             (Decision.PASS, Decision.FAIL),
             (Decision.FAIL, Decision.PASS),
             (Decision.PASS, Decision.MANUAL_REVIEW),
             (Decision.MANUAL_REVIEW, Decision.PASS),
-            (Decision.FAIL, Decision.MANUAL_REVIEW),
-            (Decision.MANUAL_REVIEW, Decision.FAIL),
         )
         for glm_decision, gemini_decision in pairs:
             with self.subTest(glm=glm_decision, gemini=gemini_decision):
@@ -160,8 +158,35 @@ class ConsensusTests(unittest.TestCase):
                 result = self.review(glm, gemini)
                 self.assertEqual(result.decision, Decision.PASS)
                 self.assertEqual(result.issues, ())
+                consensus = result.metadata["consensus"]
+                self.assertEqual(consensus["rounds_used"], 3)
+                self.assertTrue(consensus["disagreement_pass"])
+                self.assertFalse(consensus["disagreement_blocked"])
+                self.assertEqual(len(glm.calls), 3)
+                self.assertEqual(len(gemini.calls), 3)
+
+    def test_mixed_decision_without_any_pass_blocks_merge(self):
+        pairs = (
+            (Decision.FAIL, Decision.MANUAL_REVIEW),
+            (Decision.MANUAL_REVIEW, Decision.FAIL),
+        )
+        for glm_decision, gemini_decision in pairs:
+            with self.subTest(glm=glm_decision, gemini=gemini_decision):
+                glm = ScriptedReviewer(outcome(glm_decision, "glm"))
+                gemini = ScriptedReviewer(outcome(gemini_decision, "gemini"))
+                result = self.review(glm, gemini)
+                self.assertEqual(result.decision, Decision.FAIL)
+                self.assertEqual(len(result.issues), 2)
+                consensus = result.metadata["consensus"]
+                self.assertEqual(consensus["rounds_used"], 3)
+                self.assertFalse(consensus["disagreement_pass"])
+                self.assertTrue(consensus["disagreement_blocked"])
                 self.assertEqual(
-                    result.metadata["consensus"]["rounds_used"], 3
+                    consensus["provider_decisions"],
+                    {
+                        "glm": glm_decision.value,
+                        "gemini": gemini_decision.value,
+                    },
                 )
                 self.assertEqual(len(glm.calls), 3)
                 self.assertEqual(len(gemini.calls), 3)

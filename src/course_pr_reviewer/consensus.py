@@ -1,4 +1,4 @@
-"""Bounded dual-provider reconsideration with a final disagreement pass."""
+"""Bounded dual-provider reconsideration; an exhausted disagreement needs a PASS."""
 
 from __future__ import annotations
 
@@ -122,6 +122,7 @@ class _ConsensusReviewer:
         history: list[dict[str, Any]],
         degraded: bool,
         disagreement_pass: bool = False,
+        disagreement_blocked: bool = False,
     ) -> dict[str, Any]:
         return {
             "consensus": {
@@ -130,6 +131,7 @@ class _ConsensusReviewer:
                 "max_rounds": self.max_rounds,
                 "degraded": degraded,
                 "disagreement_pass": disagreement_pass,
+                "disagreement_blocked": disagreement_blocked,
                 "provider_decisions": {
                     provider: outcome.decision.value
                     for provider, outcome in outcomes.items()
@@ -227,18 +229,41 @@ class _ConsensusReviewer:
                 )
             reconsideration = self._reconsideration(round_number, outcomes)
 
-        # 只有达到复核上限且双方仍不一致时才放行，完整理由保留在 history。
+        # 达到复核上限后，只有至少一方明确 PASS 才允许自动合并。
+        # 若双方都不是 PASS（典型为 FAIL + MANUAL_REVIEW），则不能放行：
+        # 有 FAIL 时按 FAIL 处理，否则转人工复核。完整理由保留在 history。
         detail = "；".join(
             f"{provider.upper()}={outcome.decision.value}"
             for provider, outcome in outcomes.items()
         )
-        return AIOutcome(
-            decision=Decision.PASS,
-            summary=(
+        final_decisions = {outcome.decision for outcome in outcomes.values()}
+        if Decision.PASS in final_decisions:
+            decision = Decision.PASS
+            issues: tuple[Issue, ...] = ()
+            summary = (
                 f"{self.stage}经过 {self.max_rounds} 轮复核仍有分歧（{detail}），"
-                "已达到复核上限，按规则视为通过。"
-            ),
-            issues=(),
+                "但至少一方给出了 PASS，已达到复核上限，按规则视为通过。"
+            )
+            disagreement_pass = True
+            disagreement_blocked = False
+        else:
+            if Decision.FAIL in final_decisions:
+                decision = Decision.FAIL
+                outcome_text = "按不通过处理。"
+            else:
+                decision = Decision.MANUAL_REVIEW
+                outcome_text = "需要人工审核。"
+            issues = _deduplicate_issues(merged)
+            summary = (
+                f"{self.stage}经过 {self.max_rounds} 轮复核仍有分歧（{detail}），"
+                f"双方均未给出 PASS，不能自动合并，{outcome_text}"
+            )
+            disagreement_pass = False
+            disagreement_blocked = True
+        return AIOutcome(
+            decision=decision,
+            summary=summary,
+            issues=issues,
             confidence=_minimum_confidence(merged),
             metadata=self._metadata(
                 rounds_used=self.max_rounds,
@@ -246,7 +271,8 @@ class _ConsensusReviewer:
                 unavailable=unavailable,
                 history=history,
                 degraded=False,
-                disagreement_pass=True,
+                disagreement_pass=disagreement_pass,
+                disagreement_blocked=disagreement_blocked,
             ),
         )
 
