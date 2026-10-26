@@ -87,6 +87,35 @@ class DeterministicReviewerTests(unittest.TestCase):
         )
         self.assertIn(ReasonCode.TITLE_MISMATCH, self.codes(result))
 
+    def test_title_edges_ignore_only_known_invisible_characters(self):
+        base = "[2023010102刘西莹]Lab1作业提交"
+        for character in ("\u00a0", "\u200b", "\ufeff"):
+            for title in (
+                character + base,
+                base + character,
+                character + base + character,
+                character * 2 + base + character * 2,
+            ):
+                with self.subTest(character=ord(character), title=repr(title)):
+                    result = review_pull_request(
+                        self.course, self.roster, self.snapshot(title=title)
+                    )
+                    self.assertEqual(result.decision, Decision.PASS)
+
+    def test_title_edges_keep_other_whitespace_and_internal_invisible_characters(self):
+        base = "[2023010102刘西莹]Lab1作业提交"
+        for title in (
+            " " + base,
+            base + " ",
+            "[2023010102刘西莹]Lab1\u200b作业提交",
+        ):
+            with self.subTest(title=repr(title)):
+                result = review_pull_request(
+                    self.course, self.roster, self.snapshot(title=title)
+                )
+                self.assertEqual(result.decision, Decision.FAIL)
+                self.assertEqual(result.reason_codes, ("TITLE_MISMATCH",))
+
     def test_assignment_case_error_gives_the_exact_title_without_accepting_it(self):
         for template in (
             "[{student_id}{student_name}]{assignment_id}作业提交",

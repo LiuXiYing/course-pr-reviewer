@@ -34,6 +34,14 @@ TITLE_PATTERNS = {
 
 LOGGER = logging.getLogger(__name__)
 
+# 从聊天工具或文档粘贴标题时，首尾可能带上肉眼不可见的字符。只清理这三个
+# 已确认会造成“标题看起来一致却匹配失败”的字符，其他空白仍按精确匹配处理。
+TITLE_EDGE_INVISIBLE_CHARS = "\u00a0\u200b\ufeff"
+
+
+def _strip_invisible_title_edges(title: str) -> str:
+    return title.strip(TITLE_EDGE_INVISIBLE_CHARS)
+
 
 def _title_regex(template: str) -> re.Pattern[str]:
     parts: list[str] = []
@@ -346,9 +354,10 @@ def review_pull_request(
     title_template = course.data["course"].get(
         "title_template", "[{student_id}{student_name}]{assignment_id}作业提交"
     )
-    match = _title_regex(title_template).fullmatch(snapshot.title)
+    title = _strip_invisible_title_edges(snapshot.title)
+    match = _title_regex(title_template).fullmatch(title)
     if not match:
-        missing_assignment = snapshot.title == course.expected_title(student, "")
+        missing_assignment = title == course.expected_title(student, "")
         detail = "标题缺少作业编号。" if missing_assignment else ""
         return ReviewResult(
             decision=Decision.FAIL,
@@ -356,7 +365,7 @@ def review_pull_request(
             issues=(
                 _issue(
                     ReasonCode.TITLE_MISMATCH,
-                    f"{detail}当前标题：`{snapshot.title}`；要求格式：`{title_template}`。"
+                    f"{detail}当前标题：`{title}`；要求格式：`{title_template}`。"
                     + _enabled_title_examples(course, student),
                 ),
             ),
@@ -443,7 +452,7 @@ def review_pull_request(
     metadata["assignment_id"] = assignment_id
     metadata["review_time"] = review_time_context(course, snapshot, assignment_id)
     expected_title = course.expected_title(student, assignment_id)
-    if snapshot.title != expected_title:
+    if title != expected_title:
         return ReviewResult(
             decision=Decision.FAIL,
             summary="PR 标题不是根据学生名单生成的精确标题。",
