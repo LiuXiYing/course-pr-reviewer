@@ -116,6 +116,7 @@ class PublisherReceiptTests(unittest.TestCase):
         self.assertEqual(client.merges[0]["sha"], HEAD)
 
     def test_reports_are_rebuilt_when_roster_is_available(self):
+        self.course.data["grading"]["storage"]["export_on_finalize"] = True
         client = FakeClient(open_pr())
         self.publisher(client, roster=self.fixture.roster()).publish(
             self.course, result(), expected_repository="teacher/course"

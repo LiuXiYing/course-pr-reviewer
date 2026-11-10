@@ -33,7 +33,9 @@ grading:
     branch: grades
     schema_version: 1
     write_receipts: true
-    export_on_finalize: true
+    # 合并后不在审核任务里重建报表：一次重建要读几百份收据，会吃掉
+    # GITHUB_TOKEN 的每小时额度。交给每日 grade-reconcile 或手工 grade export。
+    export_on_finalize: false
   policy_version: 2026-fall-v1
   defaults:
     max_points: "10.00"

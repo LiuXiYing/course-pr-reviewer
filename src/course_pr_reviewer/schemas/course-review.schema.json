@@ -86,7 +86,7 @@
             },
             "schema_version": {"const": 1},
             "write_receipts": {"type": "boolean", "default": true},
-            "export_on_finalize": {"type": "boolean", "default": true}
+            "export_on_finalize": {"type": "boolean", "default": false}
           }
         },
         "policy_version": {

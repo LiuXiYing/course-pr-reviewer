@@ -58,7 +58,7 @@ def default_grading_settings() -> dict[str, Any]:
             "branch": "grades",
             "schema_version": 1,
             "write_receipts": True,
-            "export_on_finalize": True,
+            "export_on_finalize": False,
         },
         "policy_version": DEFAULT_POLICY_VERSION,
         "defaults": {

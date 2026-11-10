@@ -450,7 +450,7 @@ class GitHubResultPublisher:
             grading["receipt_error"] = str(exc)
             return
         if course.grading and course.grading.get("storage", {}).get(
-            "export_on_finalize", True
+            "export_on_finalize", False
         ):
             if self.roster is None:
                 grading["report_status"] = "skipped_no_roster"

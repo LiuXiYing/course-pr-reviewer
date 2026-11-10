@@ -48,6 +48,30 @@ def _audit(
     )
 
 
+def _reports_are_stale(store: GradeStore, receipts: dict) -> bool:
+    """报表是否落后于收据：落后才重建，避免每次对账都读几百份文件。"""
+    summary = store.read_json(records.REPORTS["summary"]) or {}
+    generated = summary.get("generated_at")
+    if not isinstance(generated, str):
+        return True
+    try:
+        stamp = dt.datetime.fromisoformat(generated)
+    except ValueError:
+        return True
+    for record in receipts.values():
+        for key in ("accepted_at", "effective_submission_at"):
+            value = record.get(key)
+            if not isinstance(value, str):
+                continue
+            try:
+                moment = dt.datetime.fromisoformat(value)
+            except ValueError:
+                continue
+            if moment > stamp:
+                return True
+    return False
+
+
 def reconcile(
     store: GradeStore,
     course: CourseConfiguration,
@@ -138,7 +162,7 @@ def reconcile(
         )
 
     summary: dict[str, Any] | None = None
-    if rebuild and (finalized or not checked):
+    if rebuild and (finalized or _reports_are_stale(store, receipts)):
         result = rebuild_reports(store, course, roster)
         summary = result["summary"]
 
