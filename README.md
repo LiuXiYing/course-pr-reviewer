@@ -2,7 +2,7 @@
 
 面向课程作业仓库的通用 GitHub PR 审核器。每个课程只维护作业配置和学生名单，身份校验、确定性规则、AI、OCR 和视觉审核由一个版本化 Action 复用。
 
-> 当前状态：`0.14.1`。确定性规则、Gemini/GLM 双模型共识审核、可选本地 PaddleOCR、AI 错误说明、PR 评论、自动合并、超期关闭和重复提交关闭均已实现；本版新增 `legacy` / `tiered` 迟交计分、48 小时修正期、`grades` 分支成绩事实与 CSV 导出。
+> 当前状态：`0.15.0`。确定性规则、Gemini/GLM 双模型共识审核、可选本地 PaddleOCR、AI 错误说明、PR 评论、自动合并、超期关闭和重复提交关闭均已实现；本版新增 `legacy` / `tiered` 迟交计分、48 小时修正期、`grades` 分支成绩事实与 CSV 导出。
 
 ## 设计原则
 
@@ -361,6 +361,8 @@ reports/summary.json    完成率统计
 ```
 
 写收据分两步：审核 `PASS` 时先写 `PENDING_ACCEPTANCE`，合并成功并核对 merge commit 后才写 `FINALIZED`。tiered 作业如果先写收据失败，就不合并；已合并但收据没写完，由每日 `grade-reconcile` 补齐，不要求学生重新推送。
+
+评论只有一条：合并确认后，审核器会把同一条评论刷新为最终状态（记录已写入 + 按合并后事实重算的累计得分率），不会另发重复评论；刷新失败不影响合并与收据，只在结果里记 `comment_update: failed`。
 
 `reports/` 不在合并路径里重建：一次重建要把所有收据读一遍，几十人一个学期就是几百次 API 请求，会吃掉 `GITHUB_TOKEN` 的每小时额度。由每日 `grade-reconcile`（发现报表落后于收据时）或手工 `grade export` 重建，需要合并即刷新时把 `grading.storage.export_on_finalize` 设为 `true`。
 

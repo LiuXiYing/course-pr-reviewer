@@ -16,6 +16,7 @@ from .config import CourseConfiguration
 from .exceptions import GradeStoreError, ReviewSystemError
 from .feedback import validate_feedback
 from .grading import records
+from .grading.summary import semester_summary
 from .models import Decision, ReasonCode
 from .snapshot import REPOSITORY_RE, SHA_RE, GitHubClient
 
@@ -244,6 +245,37 @@ def _receipt_label(status: Any) -> str:
     }.get(str(status), "尚未写入 grades 分支")
 
 
+def _semester_lines(result: dict[str, Any]) -> list[str]:
+    """累计得分率：只由 grades 分支的事实算出，不依赖模型。"""
+    grading = result.get("metadata", {}).get("grading")
+    if not isinstance(grading, dict):
+        return []
+    semester = grading.get("semester")
+    if not isinstance(semester, dict):
+        return []
+    lines = ["", "### 本学期成绩（截至本次提交）", ""]
+    graded = int(semester.get("graded") or 0)
+    if graded > 0:
+        lines.append(
+            f"- 计分作业：{graded} 个，合计 "
+            f"{_safe_markdown(semester.get('points'))} / "
+            f"{_safe_markdown(semester.get('possible'))}，"
+            f"得分率 {_safe_markdown(semester.get('rate_percent'))}%"
+        )
+    else:
+        lines.append("- 计分作业：0 个，暂无得分率（已发布作业尚未启用分段计分）")
+    detail = f"- 全部作业：已完成 {int(semester.get('completed') or 0)} 个"
+    if int(semester.get("pending") or 0):
+        detail += f"，待确认 {int(semester['pending'])} 个"
+    if int(semester.get("missing") or 0):
+        detail += f"，未提交 {int(semester['missing'])} 个"
+    if int(semester.get("not_due") or 0):
+        detail += f"，未到期 {int(semester['not_due'])} 个"
+    lines.append(detail)
+    lines.append(f"- 作业总数：{int(semester.get('assignments_total') or 0)} 个")
+    return lines
+
+
 def render_comment(result: dict[str, Any]) -> str:
     decision = Decision(result["decision"])
     lines = [COMMENT_MARKER, _heading(result, decision)]
@@ -253,6 +285,7 @@ def render_comment(result: dict[str, Any]) -> str:
         lines.extend(["", "### 原始审核结果（判定依据）"])
     lines.extend(["", _safe_markdown_with_code(result["summary"])])
     lines.extend(_grading_lines(result))
+    lines.extend(_semester_lines(result))
     metadata = result.get("metadata", {})
     consensus_rows = []
     for key, label in (
@@ -500,11 +533,41 @@ class GitHubResultPublisher:
             return True
         return course.feature_enabled("close_late_pr")
 
-    def _create_comment(self, repository: str, number: int, body: str) -> None:
+    def _create_comment(self, repository: str, number: int, body: str) -> int | None:
         repo = urllib.parse.quote(repository, safe="/")
-        self.github.post_json(
+        response = self.github.post_json(
             f"/repos/{repo}/issues/{number}/comments", {"body": body}
         )
+        if isinstance(response, dict) and isinstance(response.get("id"), int):
+            return response["id"]
+        return None
+
+    def _update_comment(self, repository: str, comment_id: int, body: str) -> None:
+        repo = urllib.parse.quote(repository, safe="/")
+        self.github.patch_json(
+            f"/repos/{repo}/issues/comments/{comment_id}", {"body": body}
+        )
+
+    def _refresh_comment(
+        self,
+        course: CourseConfiguration,
+        repository: str,
+        comment_id: int,
+        result: dict[str, Any],
+        grading: dict[str, Any],
+    ) -> None:
+        """合并后刷新同一条评论；刷新失败不影响已完成的合并与收据。"""
+        try:
+            grading["semester"] = semester_summary(
+                self.grade_store,
+                course,
+                str(result["metadata"].get("student_id", "")),
+            )
+            self._update_comment(repository, comment_id, render_comment(result))
+            grading["comment_update"] = "updated"
+        except Exception as exc:  # noqa: BLE001 - 评论是附注，不阻塞
+            grading["comment_update"] = "failed"
+            grading["comment_update_error"] = str(exc)
 
     def publish(
         self,
@@ -536,8 +599,32 @@ class GitHubResultPublisher:
             )
 
         commented = False
+        comment_id: int | None = None
         grading = self._grading(result) if course.grading_enabled else None
         receipt_status: str | None = None
+        if grading is not None:
+            # 累计得分率先算好放进评论：读的是 grades 分支已有收据 + 本次成绩，
+            # 失败只影响这一段，不阻塞审核与合并。
+            try:
+                grading["semester"] = semester_summary(
+                    self.grade_store,
+                    course,
+                    str(result["metadata"].get("student_id", "")),
+                    extra={
+                        "assignment_id": result["metadata"].get("assignment_id"),
+                        **{
+                            key: grading.get(key)
+                            for key in (
+                                "mode",
+                                "awarded_points",
+                                "max_points",
+                                "time_status",
+                            )
+                        },
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - 只是附注，不影响判定
+                grading["semester_error"] = type(exc).__name__
         if (
             grading is not None
             and result["decision"] == Decision.PASS.value
@@ -558,8 +645,8 @@ class GitHubResultPublisher:
                 receipt_status = "FAILED"
 
         if course.feature_enabled("comment_review"):
-            self._create_comment(repository, number, render_comment(result))
-            commented = True
+            comment_id = self._create_comment(repository, number, render_comment(result))
+            commented = comment_id is not None
 
         repo = urllib.parse.quote(repository, safe="/")
         if close_requested and self._close_allowed(course, reason_codes):
@@ -609,6 +696,12 @@ class GitHubResultPublisher:
                     else None,
                 )
                 receipt_status = grading.get("receipt_status")
+                if comment_id is not None:
+                    # 合并确认后把同一条评论更新为最终状态：记录已写入、
+                    # 本次得分与累计得分率都按合并后的事实重算。
+                    self._refresh_comment(
+                        course, repository, comment_id, result, grading
+                    )
             return PublicationOutcome(
                 commented=commented,
                 merged=True,
