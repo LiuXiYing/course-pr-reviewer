@@ -1,5 +1,5 @@
 name: Course PR Reviewer
-description: Fail-closed reusable reviewer for course assignment pull requests
+description: Fail-closed reusable reviewer and grade writer for course assignment pull requests
 author: LiuXiYing
 
 branding:
@@ -7,6 +7,12 @@ branding:
   color: green
 
 inputs:
+  mode:
+    description: >-
+      review (default) reviews and publishes one PR; grade-reconcile promotes
+      PENDING receipts after a real merge; grade-export regenerates reports.
+    required: false
+    default: review
   config-path:
     description: Path to .github/course-review.yml in the caller repository
     required: true
@@ -32,6 +38,16 @@ inputs:
   gemini-api-key:
     description: Gemini API key; required when a review provider is gemini
     required: false
+  since:
+    description: For grade-reconcile, only handle receipts submitted at or after this ISO time
+    required: false
+  only-pr:
+    description: For grade-reconcile, only handle this PR number
+    required: false
+  dry-run:
+    description: For grade-reconcile / grade-export, print the plan without writing
+    required: false
+    default: "false"
   teacher-email:
     description: Deprecated and ignored; email notifications are disabled
     required: false
@@ -57,6 +73,21 @@ outputs:
   result-json:
     description: Compact structured review result
     value: ${{ steps.review.outputs.result-json }}
+  head_sha:
+    description: The reviewed head SHA
+    value: ${{ steps.review.outputs.head_sha }}
+  grading_mode:
+    description: legacy or tiered
+    value: ${{ steps.review.outputs.grading_mode }}
+  graded_status:
+    description: ON_TIME, ON_TIME_CORRECTED, LATE, or AFTER_FINAL_ACCEPT
+    value: ${{ steps.review.outputs.graded_status }}
+  score:
+    description: Awarded points for this assignment, empty when unscored
+    value: ${{ steps.review.outputs.score }}
+  receipt_status:
+    description: PENDING_ACCEPTANCE, FINALIZED, or FAILED
+    value: ${{ steps.review.outputs.receipt_status }}
 
 runs:
   using: composite
@@ -73,6 +104,7 @@ runs:
       run: python -m pip install --disable-pip-version-check "$REVIEWER_ACTION_PATH"
 
     - name: Install local PaddleOCR runtime when enabled
+      if: inputs.mode == 'review'
       shell: bash
       env:
         COURSE_REVIEW_CONFIG: ${{ inputs.config-path }}
@@ -85,6 +117,7 @@ runs:
 
     - name: Review and publish pull request result
       id: review
+      if: inputs.mode == 'review'
       shell: bash
       env:
         COURSE_REVIEW_CONFIG: ${{ inputs.config-path }}
@@ -107,6 +140,45 @@ runs:
 
         course-pr-reviewer publish \
           --config "$COURSE_REVIEW_CONFIG" \
+          --students "$COURSE_STUDENTS_CONFIG" \
           --result-file review-result.json
 
         exit "$review_status"
+
+    - name: Reconcile interrupted grade records
+      if: inputs.mode == 'grade-reconcile'
+      shell: bash
+      env:
+        COURSE_REVIEW_CONFIG: ${{ inputs.config-path }}
+        COURSE_STUDENTS_CONFIG: ${{ inputs.students-path }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        SINCE: ${{ inputs.since }}
+        ONLY_PR: ${{ inputs.only-pr }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        args=()
+        if [[ -n "$SINCE" ]]; then args+=(--since "$SINCE"); fi
+        if [[ -n "$ONLY_PR" ]]; then args+=(--only-pr "$ONLY_PR"); fi
+        if [[ "$DRY_RUN" == "true" ]]; then args+=(--dry-run); fi
+        course-pr-reviewer grade reconcile \
+          --config "$COURSE_REVIEW_CONFIG" \
+          --students "$COURSE_STUDENTS_CONFIG" \
+          --repository "$GITHUB_REPOSITORY" \
+          "${args[@]}"
+
+    - name: Regenerate grade reports
+      if: inputs.mode == 'grade-export'
+      shell: bash
+      env:
+        COURSE_REVIEW_CONFIG: ${{ inputs.config-path }}
+        COURSE_STUDENTS_CONFIG: ${{ inputs.students-path }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        args=()
+        if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+        course-pr-reviewer grade export \
+          --config "$COURSE_REVIEW_CONFIG" \
+          --students "$COURSE_STUDENTS_CONFIG" \
+          --repository "$GITHUB_REPOSITORY" \
+          "${args[@]}"

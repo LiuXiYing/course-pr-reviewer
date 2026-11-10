@@ -14,6 +14,7 @@ import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 
 from .exceptions import ConfigurationError
+from .grading.schema import validate_grading
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,15 @@ class StudentRoster:
 @dataclass(frozen=True)
 class CourseConfiguration:
     data: dict[str, Any]
+    grading_settings: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        # A configuration built directly from a dict (tests, tools) must behave
+        # like one loaded from disk, otherwise grading silently switches off.
+        if self.grading_settings is None:
+            settings = validate_grading(self.data)
+            if settings is not None:
+                object.__setattr__(self, "grading_settings", settings)
 
     @property
     def name(self) -> str:
@@ -197,16 +207,106 @@ class CourseConfiguration:
             assignment_id=assignment_id,
         ).strip("/")
 
+    @property
+    def grading_enabled(self) -> bool:
+        return self.grading is not None
+
+    @property
+    def grading(self) -> dict[str, Any] | None:
+        return self.grading_settings
+
+    @property
+    def grading_branch(self) -> str:
+        settings = self.grading or {}
+        return str(settings.get("storage", {}).get("branch", "grades"))
+
+    @property
+    def grading_policy_version(self) -> str:
+        settings = self.grading or {}
+        return str(settings.get("policy_version", ""))
+
+    @property
+    def final_accept_at(self) -> dt.datetime | None:
+        raw = self.data["course"].get("final_accept_at")
+        if not raw:
+            return None
+        return dt.datetime.fromisoformat(raw)
+
+    def grade_mode(self, assignment_id: str) -> str | None:
+        assignment = self.assignment(assignment_id) or {}
+        block = assignment.get("grading")
+        if not isinstance(block, dict):
+            return None
+        mode = block.get("mode")
+        return mode if isinstance(mode, str) else None
+
+    def assignment_grade_config(self, assignment_id: str) -> dict[str, Any]:
+        """Everything ``compute_grade`` needs for one assignment."""
+        settings = self.grading or {}
+        defaults = settings.get("defaults", {})
+        tiered = defaults.get("tiered", {})
+        grace = tiered.get("grace", {})
+        block = (self.assignment(assignment_id) or {}).get("grading") or {}
+        return {
+            "mode": block.get("mode"),
+            "max_points": block.get("max_points", defaults.get("max_points")),
+            "grace_hours": int(grace.get("hours", 0)) if grace.get("enabled") else 0,
+            "grace_enabled": bool(grace.get("enabled", False)),
+            "require_substantive_snapshot": bool(
+                grace.get("require_substantive_snapshot", True)
+            ),
+            "policy": {
+                "policy_version": settings.get("policy_version"),
+                "timezone": self.timezone,
+                "bands": tiered.get("bands"),
+                "legacy": defaults.get("legacy", {}),
+                "after_final_accept": tiered.get("after_final_accept"),
+            },
+        }
+
 
 def _schema(name: str) -> dict[str, Any]:
     schema_path = files("course_pr_reviewer").joinpath("schemas", name)
     return yaml.safe_load(schema_path.read_text(encoding="utf-8"))
 
 
+class _StrictLoader(yaml.SafeLoader):
+    """SafeLoader that refuses duplicate mapping keys.
+
+    ``yaml.safe_load`` silently keeps the last duplicate assignment, which turns
+    a copy-paste accident into a silently different deadline or grading mode.
+    """
+
+
+def _construct_mapping(loader, node, deep=False):
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:  # unhashable YAML key
+            raise yaml.constructor.ConstructorError(
+                None, None, "配置中出现无法用作键的值", key_node.start_mark
+            ) from exc
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"配置中出现重复的键：{key}", key_node.start_mark
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping
+)
+
+
 def _load_yaml(path: str | Path) -> dict[str, Any]:
     yaml_path = Path(path)
     try:
-        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+        data = yaml.load(
+            yaml_path.read_text(encoding="utf-8"), Loader=_StrictLoader
+        )
     except FileNotFoundError as exc:
         raise ConfigurationError(f"配置文件不存在：{yaml_path}") from exc
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
@@ -359,7 +459,8 @@ def load_course_config(path: str | Path) -> CourseConfiguration:
                 raise ConfigurationError(
                     f"{assignment_id} 启用 template_metrics 必须配置 report_file 和 Markdown report_template"
                 )
-    course = CourseConfiguration(data)
+    settings = validate_grading(data)
+    course = CourseConfiguration(data, grading_settings=settings)
     for section_name, providers in (
         ("ai", course.ai_providers),
         ("vision", course.vision_providers),

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .exceptions import ContentLimitExceeded, ReviewSystemError
+from .exceptions import ContentConflict, ContentLimitExceeded, ReviewSystemError
 
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -194,7 +194,14 @@ class GitHubClient:
                 detail = ""
             detail = detail.replace("\n", " ")[:500]
             suffix = f"：{detail}" if detail else ""
-            raise ReviewSystemError(
+            # 409/422 from the Contents API means the file moved under us; the
+            # grade writer retries with a fresh blob SHA instead of forcing.
+            error_type = (
+                ContentConflict
+                if exc.code in (409, 422) and method in {"PUT", "DELETE"}
+                else ReviewSystemError
+            )
+            raise error_type(
                 f"GitHub API {method} {path} 返回 HTTP {exc.code}{suffix}"
             ) from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:

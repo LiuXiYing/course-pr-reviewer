@@ -35,3 +35,11 @@ class ContentLimitExceeded(ReviewerError):
 
 class InvalidStudentImage(ReviewerError):
     """A submitted image is malformed or violates image safety limits."""
+
+
+class ContentConflict(ReviewSystemError):
+    """A write lost an optimistic-concurrency race and must be retried."""
+
+
+class GradeStoreError(ReviewSystemError):
+    """The ``grades`` branch could not be read or written reliably."""

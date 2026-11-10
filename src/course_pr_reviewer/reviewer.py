@@ -17,6 +17,7 @@ from .exceptions import (
     InvalidStudentImage,
     ReviewSystemError,
 )
+from .grading.runner import GradingContext, config_digest
 from .models import Decision, Issue, ReasonCode, ReviewResult
 from .path_utils import canonical_filename
 from .report_checks import required_address_issues
@@ -302,6 +303,8 @@ def review_pull_request(
     ai_reviewer: GlmAIReviewer | None = None,
     vision_reviewer: GlmVisionReviewer | None = None,
     github=None,
+    grade_store=None,
+    workflow_run_id: int | None = None,
 ) -> ReviewResult:
     metadata = {
         "course": course.name,
@@ -450,6 +453,8 @@ def review_pull_request(
             metadata=metadata,
         )
     metadata["assignment_id"] = assignment_id
+    metadata["student_id"] = student.student_id
+    metadata["github_login"] = student.github
     metadata["review_time"] = review_time_context(course, snapshot, assignment_id)
     expected_title = course.expected_title(student, assignment_id)
     if title != expected_title:
@@ -464,6 +469,38 @@ def review_pull_request(
 
     assignment = _with_defaults(course, assignment)
 
+    # 评分上下文：内容审核决定 review_decision，这里只决定 grade_decision。
+    # 有它的作业，迟交不再是 FAIL 条件；没有它的旧配置完全保持原语义。
+    grading_context: GradingContext | None = None
+    if course.grading_enabled and course.grade_mode(assignment_id):
+        grading_context = GradingContext(
+            course=course,
+            assignment_id=assignment_id,
+            assignment=assignment,
+            student=student,
+            snapshot=snapshot,
+            github=github,
+            store=grade_store,
+            workflow_run_id=workflow_run_id,
+        )
+        try:
+            metadata["grading"] = grading_context.preliminary().decision.to_dict()
+        except (ReviewSystemError, ValueError) as exc:
+            return ReviewResult(
+                decision=Decision.ERROR,
+                summary="评分配置无法执行，已暂停自动合并与记分。",
+                issues=(_issue(ReasonCode.CONFIG_ERROR, str(exc)),),
+                metadata=metadata,
+            )
+
+    def _deadline_issues(close_allowed: bool) -> list[Issue]:
+        """截止时间结论：启用评分后只在成绩里体现，不再阻止合并。"""
+        if grading_context is not None:
+            return []
+        return _late_deadline_issues(
+            course, assignment, snapshot, close_allowed=close_allowed, metadata=metadata
+        )
+
     if not snapshot.files:
         return _attach_late(
             ReviewResult(
@@ -472,9 +509,7 @@ def review_pull_request(
                 issues=(_issue(ReasonCode.NO_FILES_CHANGED, "未检测到变更文件"),),
                 metadata=metadata,
             ),
-            _late_deadline_issues(
-                course, assignment, snapshot, close_allowed=True, metadata=metadata
-            ),
+            _deadline_issues(True),
         )
 
     # 标题里的作业编号已经确认，先查这份作业是不是已经合并过：是的话没有审核的
@@ -558,9 +593,7 @@ def review_pull_request(
                 issues=tuple(issues),
                 metadata=metadata,
             ),
-            _late_deadline_issues(
-                course, assignment, snapshot, close_allowed=True, metadata=metadata
-            ),
+            _deadline_issues(True),
         )
 
     # Only explicitly opted-in assignments execute this gate. Never inherit it
@@ -588,9 +621,7 @@ def review_pull_request(
                 summary="模板数量检查未通过；后续 AI 文本和图片审核未执行。",
                 issues=tuple(metric_issues), metadata=metadata,
             ),
-            _late_deadline_issues(
-                course, assignment, snapshot, close_allowed=True, metadata=metadata,
-            ),
+            _deadline_issues(True),
         )
 
     # 内容审核（AI 文本、图片）的结论先记录，不在这里返回：截止时间判定排在最后，
@@ -720,18 +751,10 @@ def review_pull_request(
     if content_result is not None:
         return _attach_late(
             content_result,
-            _late_deadline_issues(
-                course,
-                assignment,
-                snapshot,
-                close_allowed=content_result.decision is Decision.FAIL,
-                metadata=metadata,
-            ),
+            _deadline_issues(content_result.decision is Decision.FAIL),
         )
 
-    late_issues = _late_deadline_issues(
-        course, assignment, snapshot, close_allowed=True, metadata=metadata
-    )
+    late_issues = _deadline_issues(True)
     if late_issues:
         # 内容没有任何问题，只因为超时才未通过：必须说清楚，避免学生以为作业内容不合格。
         return ReviewResult(
@@ -743,6 +766,44 @@ def review_pull_request(
                 "将按课程规则关闭该 PR。"
             ),
             issues=tuple(late_issues),
+            metadata=metadata,
+        )
+
+    if grading_context is not None:
+        try:
+            outcome = grading_context.finalise()
+        except (ReviewSystemError, ValueError) as exc:
+            return ReviewResult(
+                decision=Decision.ERROR,
+                summary="成绩记录未能完成，已暂停自动合并；系统可重试。",
+                issues=(_issue(ReasonCode.SERVICE_ERROR, str(exc)),),
+                metadata=metadata,
+            )
+        grading_metadata = outcome.decision.to_dict()
+        if outcome.claim_status:
+            grading_metadata["claim_status"] = outcome.claim_status
+        if outcome.claim_written:
+            grading_metadata["claim_written"] = True
+        if outcome.claim_event_at:
+            grading_metadata["claim_event_at"] = outcome.claim_event_at
+        metadata["grading"] = grading_metadata
+        grading_metadata["config_sha256"] = config_digest(course)
+        if workflow_run_id is not None:
+            grading_metadata["workflow_run_id"] = workflow_run_id
+        if outcome.blocking_issue is not None:
+            code, message = outcome.blocking_issue
+            return ReviewResult(
+                decision=Decision.FAIL,
+                summary="本次提交晚于课程最终收件截止时间，不再计分。",
+                issues=(_issue(ReasonCode(code), message),),
+                metadata=metadata,
+            )
+        return ReviewResult(
+            decision=Decision.PASS,
+            summary=(
+                "账号、标题、文件范围、必交文件、head SHA 和已启用的内容审核均已通过。"
+                f"{outcome.decision.explanation}"
+            ),
             metadata=metadata,
         )
 

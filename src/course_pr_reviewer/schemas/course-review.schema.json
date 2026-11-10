@@ -13,6 +13,13 @@
       "required": ["name", "timezone"],
       "properties": {
         "name": {"type": "string", "minLength": 1, "maxLength": 100},
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "稳定的课程标识，写入 grades 收据；建议用小写连字符"
+        },
         "timezone": {"type": "string", "minLength": 1, "maxLength": 100},
         "title_template": {
           "type": "string",
@@ -26,7 +33,12 @@
           "maxLength": 200,
           "default": "{student_id}{student_name}/{assignment_id}"
         },
-        "merge_method": {"enum": ["merge", "squash", "rebase"], "default": "merge"}
+        "merge_method": {"enum": ["merge", "squash", "rebase"], "default": "merge"},
+        "final_accept_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "全课程最终收件截止；必须带时区，且晚于每个 tiered 作业的 deadline"
+        }
       }
     },
     "features": {
@@ -41,7 +53,12 @@
         "ai_feedback": {"type": "boolean", "default": false},
         "ocr_review": {"type": "boolean"},
         "vision_review": {"type": "boolean"},
-        "metrics": {"type": "boolean"}
+        "metrics": {"type": "boolean"},
+        "grading": {
+          "type": "boolean",
+          "default": false,
+          "description": "开启后按 grading 块计算成绩并写入 grades 分支；迟交不再阻止合并"
+        }
       }
     },
     "defaults": {
@@ -51,6 +68,77 @@
         "min_nonempty_lines": {"type": "integer", "minimum": 0, "maximum": 10000},
         "allow_extra_files": {"type": "boolean"},
         "late_close_after_days": {"type": "integer", "minimum": 0, "maximum": 365}
+      }
+    },
+    "grading": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["storage", "defaults"],
+      "properties": {
+        "storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
+              "default": "grades"
+            },
+            "schema_version": {"const": 1},
+            "write_receipts": {"type": "boolean", "default": true},
+            "export_on_finalize": {"type": "boolean", "default": true}
+          }
+        },
+        "policy_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "default": "2026-fall-v1"
+        },
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_points": {"$ref": "#/$defs/points", "default": "10.00"},
+            "legacy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "record_completion": {"type": "boolean", "default": true},
+                "fixed_points": {
+                  "oneOf": [{"$ref": "#/$defs/points"}, {"type": "null"}],
+                  "default": null
+                }
+              }
+            },
+            "tiered": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "grace": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": {"type": "boolean", "default": true},
+                    "hours": {"type": "integer", "minimum": 0, "maximum": 720, "default": 48},
+                    "require_substantive_snapshot": {"type": "boolean", "default": true}
+                  }
+                },
+                "bands": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 12,
+                  "items": {"$ref": "#/$defs/band"}
+                },
+                "after_final_accept": {
+                  "enum": ["reject_merge", "accept_unscored"],
+                  "default": "reject_merge"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "ai": {
@@ -149,6 +237,25 @@
     }
   },
   "$defs": {
+    "points": {
+      "type": "string",
+      "description": "十进制分值，最多两位小数，例如 \"10.00\"；避免二进制浮点误差",
+      "pattern": "^(0|[1-9][0-9]{0,5})(\\.[0-9]{1,2})?$"
+    },
+    "band": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_late_hours", "cap_percent"],
+      "properties": {
+        "max_late_hours": {
+          "oneOf": [
+            {"type": "integer", "minimum": 0, "maximum": 100000},
+            {"type": "null"}
+          ]
+        },
+        "cap_percent": {"type": "integer", "minimum": 0, "maximum": 100}
+      }
+    },
     "providerModel": {
       "type": "object",
       "additionalProperties": false,
@@ -255,7 +362,16 @@
         "allow_extra_files": {"type": "boolean"},
         "ai_review": {"type": "boolean"},
         "ocr_review": {"type": "boolean"},
-        "vision_review": {"type": "boolean"}
+        "vision_review": {"type": "boolean"},
+        "grading": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {"enum": ["legacy", "tiered"]},
+            "max_points": {"$ref": "#/$defs/points"}
+          }
+        }
       }
     }
   }

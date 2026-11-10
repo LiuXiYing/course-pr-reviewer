@@ -2,7 +2,7 @@
 
 面向课程作业仓库的通用 GitHub PR 审核器。每个课程只维护作业配置和学生名单，身份校验、确定性规则、AI、OCR 和视觉审核由一个版本化 Action 复用。
 
-> 当前状态：`0.13.0`。确定性规则、Gemini/GLM 双模型共识审核、可选本地 PaddleOCR、AI 错误说明、PR 评论、自动合并、超期关闭和重复提交关闭均已实现。
+> 当前状态：`0.14.0`。确定性规则、Gemini/GLM 双模型共识审核、可选本地 PaddleOCR、AI 错误说明、PR 评论、自动合并、超期关闭和重复提交关闭均已实现；本版新增 `legacy` / `tiered` 迟交计分、48 小时修正期、`grades` 分支成绩事实与 CSV 导出。
 
 ## 设计原则
 
@@ -17,6 +17,9 @@
 - 标题里的作业编号确认后、进入内容审核之前，先查目标分支上是否已有这个学生这个作业的提交目录：已有说明该作业此前已经合并，判为重复提交，评论里直接写清「该作业已合并」并关闭 PR，不调用 AI，也不看文件和截止时间。这一步只认标题里已确认的编号，标题不合规的 PR 走不到这里；查不到（缺 GitHub 客户端或基础分支 SHA）或查询失败时不下结论，交回正常审核。重复提交的关闭是课程既定规则，不受 `close_late_pr` 开关影响。
 - 共享审核器不保存课程密钥、学生名单或课程题目。
 - 高权限工作流永远不检出或执行学生 PR 中的代码。
+- 内容验收与时间计分分开：`review_decision` 只回答内容是否合格，`grade_decision` 只回答值多少分。启用 `grading` 后，迟交不再阻止合并，只影响成绩上限（详见下文「迟交计分与 grades 分支」）。
+- 成绩只接受可信输入：默认分支的配置、GitHub 服务端的 head 推送时间、已验证的审核结论和确实合并成功的 PR。提交信息里的作者时间、PR 评论、学生填写的分数一律不参与计算。
+- 分档边界按秒比较、用 `Decimal` 计算，边界值 `48 小时整` 属于 90% 档，`48 小时零 1 秒` 才进入 75% 档，不存在 48～72 小时的空档。
 
 本版本不会创建教师兜底标签或自动分派人工任务。`MANUAL_REVIEW` 仍作为安全决策保留，它只会阻止自动通过。
 
@@ -36,7 +39,12 @@ features:
 ```text
 .github/
 ├── course-review.yml
-└── students.yml
+├── students.yml
+└── workflows/
+    ├── pr-check.yml          # 可信事件元数据
+    ├── pr-review.yml         # 审核 + 合并 + 写收据
+    ├── grade-reconcile.yml   # 每日对账
+    └── grade-export.yml      # 手工导出 CSV
 ```
 
 `course-review.yml` 集中保存整个学期的作业配置，每次发布新作业时向 `assignments` 追加一项。`students.yml` 在开学时根据教师确认的 Excel 名单生成，学期中仅在账号变更时更新。
@@ -305,6 +313,141 @@ gh secret set GEMINI_API_KEY
 
 高权限阶段不检出、导入或执行学生 PR 内的任何代码。不要在正式课程中引用可移动的 `main` 标签。
 
+## 迟交计分与 grades 分支
+
+### 两类作业
+
+| 类型 | 适用范围 | 是否分段扣分 | 逾期能否合并 | 写入成绩 |
+|---|---|---|---|---|
+| `legacy` | 制度上线前已发布的作业 | 否 | 能 | 记录完成事实，`awarded_points` 为 `null` |
+| `tiered` | 上线后新发布的作业 | 是 | 能 | 记录分数与迟交依据 |
+
+`legacy` 作业不会因为超时被关闭，也不会被强行赋成 100 分或 70 分；只有显式配置 `legacy.fixed_points` 才会给固定分值。
+
+### 分档（以超出 deadline 的秒数判定）
+
+| 迟交区间 | 上限 | 10 分作业 |
+|---|---:|---:|
+| `<= deadline` | 100% | 10.00 |
+| `0 < 秒数 <= 48h` | 90% | 9.00 |
+| `48h < 秒数 <= 168h` | 75% | 7.50 |
+| `168h < 秒数 <= 336h` | 60% | 6.00 |
+| `336h < 秒数 <= 672h` | 40% | 4.00 |
+| `> 672h` 且未过最终收件截止 | 20% | 2.00 |
+| 晚于 `course.final_accept_at` | 0% | 不计分，默认不合并 |
+
+`deadline` 是精确时刻：`2026-11-21T00:00:00+08:00` 表示 11 月 20 日 24:00，不是 21 日全天。
+
+### 48 小时修正期
+
+截止前用同一个 head 推过一次**实质性**内容的学生，如果在 `deadline + 48h` 内改到通过，按 100% 计分（`ON_TIME_CORRECTED`）。实质性由确定性规则判断：必交文件齐全、文本达到行数要求且不是模板复制、图片不是空白/占位/过小、没有删改他人或旧作业文件。空 PR 占位、截止后才上传内容、只改姓名、只贴空白截图都拿不到资格。判断依据是当时的 head SHA 与 GitHub 服务端事件时间，事后再改标题、关闭重开或重跑 Action 都不会产生新的提交时间。
+
+无法核验时记为 `ELIGIBILITY_UNKNOWN`，不发放资格、按真实迟交档计分，并在评论里说明可联系教师复核。
+
+### grades 分支
+
+每个课程仓库有自己的 `grades` 分支，从空的初始提交创建，不放在 `main`：
+
+```text
+metadata.json           课程标识与 schema 版本
+claims/Lab9/<学号>.json  截止前有效提交（最早一条生效）
+receipts/Lab9/<学号>.json 最终验收与得分事实
+overrides/Lab9/<学号>.json 教师审批的例外（不改写收据）
+audit/YYYY-MM/*.json    覆盖与对账审计
+reports/grades.csv      可按收据重建的汇总表
+reports/submissions.csv 每次作业明细
+reports/pending.csv     尚未确认合并的记录
+reports/summary.json    完成率统计
+```
+
+写收据分两步：审核 `PASS` 时先写 `PENDING_ACCEPTANCE`，合并成功并核对 merge commit 后才写 `FINALIZED`。tiered 作业如果先写收据失败，就不合并；已合并但收据没写完，由每日 `grade-reconcile` 补齐，不要求学生重新推送。
+
+**公开仓库的 `grades` 分支同样是公开的。** 默认记录里不放姓名、联系方式或申诉材料；如果学校不允许公开可识别的分数，请把 `student_id` 换成不可逆代号，或改用私有仓库。
+
+### 教师侧命令
+
+```bash
+# 校验 grading 配置（不访问任何分支）
+course-pr-reviewer grade validate --config .github/course-review.yml --students .github/students.yml
+
+# 初始化 grades 分支（GitHub 上创建 orphan 分支；--dir 可先写成本地目录）
+course-pr-reviewer grade init --config .github/course-review.yml --students .github/students.yml
+
+# 重建 reports/（可随时删除后重跑）
+course-pr-reviewer grade export --config .github/course-review.yml --students .github/students.yml
+
+# 对账：把已确认合并的 PENDING 收据升级为 FINALIZED
+course-pr-reviewer grade reconcile --config .github/course-review.yml --students .github/students.yml --since 2026-11-01T00:00:00+08:00
+```
+
+以上命令都支持 `--dry-run`（不写入任何内容）。`grade reconcile` 额外支持 `--only-pr <n>`。
+
+### 课程仓库需要新增的两个工作流
+
+```yaml
+# .github/workflows/grade-reconcile.yml
+name: 成绩对账
+on:
+  schedule: [{ cron: "17 20 * * *" }]   # 每天北京时间 04:17
+  workflow_dispatch:
+    inputs:
+      since: { description: 起始时间（ISO，可留空）, required: false }
+      only_pr: { description: 只处理这个 PR, required: false }
+permissions: { contents: write, pull-requests: read }
+concurrency: { group: grade-write-${{ github.repository }}, cancel-in-progress: false, queue: max }
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: LiuXiYing/course-pr-reviewer@REVIEWER_COMMIT_SHA
+        with:
+          mode: grade-reconcile
+          config-path: .github/course-review.yml
+          students-path: .github/students.yml
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          since: ${{ inputs.since }}
+          only-pr: ${{ inputs.only_pr }}
+```
+
+```yaml
+# .github/workflows/grade-export.yml
+name: 成绩导出
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run: { description: 只打印计划, required: false, default: "false" }
+permissions: { contents: write }
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: LiuXiYing/course-pr-reviewer@REVIEWER_COMMIT_SHA
+        with:
+          mode: grade-export
+          config-path: .github/course-review.yml
+          students-path: .github/students.yml
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          dry-run: ${{ inputs.dry_run }}
+```
+
+用 `GITHUB_TOKEN` 写 `grades` 分支不会再触发其它 `push` 工作流，所以报表由这两个工作流显式重建，不依赖 push 事件。
+
+### 迁移步骤
+
+1. 在 `course` 段增加稳定的 `id`（小写连字符）。
+2. `features` 增加 `grading: true`，并把 `close_late_pr` 设为 `false`。
+3. 增加 `grading` 块（照抄 [`examples/grading-review.yml`](examples/grading-review.yml)）。
+4. 给**每一个已发布**的作业加 `grading: { mode: legacy }`，不要凭 deadline 是否过去推测。
+5. 下一次发布新作业时用 `grading: { mode: tiered, max_points: "10.00" }`。
+6. 运行 `grade validate`，再运行 `grade init` 创建 `grades` 分支。
+7. 先在一个仓库灰度 2～3 个真实 PR（准时、迟交、修正），核对评论、合并与 `reports/grades.csv` 后再推广。
+
 ## 开发
 
 ```bash
@@ -316,4 +459,5 @@ CI 在 Python 3.11 和 3.12 上运行全部测试，并验证示例配置。
 
 ## 后续阶段
 
-1. 将当前结构化运行元数据汇总成学期统计报告。
+1. 教师专用覆盖工作流（`overrides/` 已有 schema 与导出层，尚无表单界面）。
+2. 可选的 rubric 部分分：当前 `PASS/FAIL` 只决定是否计分，不把 AI 置信度当百分制。

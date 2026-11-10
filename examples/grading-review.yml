@@ -1,0 +1,77 @@
+version: 1
+
+# 演示“制度上线后”的教学配置：旧作业 legacy 只记录完成，新作业 tiered 分段计分。
+# 复制到课程仓库的 .github/course-review.yml 后，按本课实际 Lab 编号替换。
+course:
+  name: 学科综合讲座
+  id: intro-to-cybersecurity-tools
+  timezone: Asia/Shanghai
+  title_template: "[{student_id}{student_name}]{assignment_id}作业提交"
+  submission_path_template: "{student_id}{student_name}/{assignment_id}"
+  merge_method: merge
+  # 可选：全课程最终收件截止。填写后晚于该时刻的提交不再计分。
+  # final_accept_at: "2027-01-10T23:59:59+08:00"
+
+features:
+  auto_merge: true
+  comment_review: true
+  # 新策略下迟交不再阻止合并，旧规则必须关闭。
+  close_late_pr: false
+  ai_review: false
+  ai_feedback: false
+  ocr_review: false
+  vision_review: false
+  metrics: false
+  grading: true
+
+defaults:
+  min_nonempty_lines: 10
+  allow_extra_files: false
+
+grading:
+  storage:
+    branch: grades
+    schema_version: 1
+    write_receipts: true
+    export_on_finalize: true
+  policy_version: 2026-fall-v1
+  defaults:
+    max_points: "10.00"
+    legacy:
+      record_completion: true
+      fixed_points: null
+    tiered:
+      grace:
+        enabled: true
+        hours: 48
+        require_substantive_snapshot: true
+      bands:
+        - { max_late_hours: 0, cap_percent: 100 }
+        - { max_late_hours: 48, cap_percent: 90 }
+        - { max_late_hours: 168, cap_percent: 75 }
+        - { max_late_hours: 336, cap_percent: 60 }
+        - { max_late_hours: 672, cap_percent: 40 }
+        - { max_late_hours: null, cap_percent: 20 }
+      after_final_accept: reject_merge
+
+assignments:
+  # 制度实施前已经发布过的作业：显式标注 legacy，不倒扣、不虚构分数。
+  Lab1:
+    enabled: true
+    deadline: "2026-10-17T00:00:00+08:00"
+    required_files:
+      - Lab1.md
+    min_nonempty_lines: 10
+    grading:
+      mode: legacy
+
+  # 制度上线后首次发布的新作业：tiered，按小时边界分段计分。
+  Lab9:
+    enabled: true
+    deadline: "2026-11-21T00:00:00+08:00"
+    required_files:
+      - Lab9.md
+    min_nonempty_lines: 10
+    grading:
+      mode: tiered
+      max_points: "10.00"
