@@ -24,6 +24,9 @@ class FakeTree:
     def default_branch(self, repository):
         return "main"
 
+    def get_json(self, path, **kwargs):
+        return {"object": {"sha": "b" * 40}}
+
     def list_dir(self, repository, path, ref):
         return sorted(self.layout.get(path, []))
 

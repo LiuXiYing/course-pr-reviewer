@@ -37,7 +37,9 @@ def backfill_completions(
     """为默认分支上已有的 legacy 作业目录补收据（幂等）。"""
     if not course.grading_enabled:
         raise ValueError("该课程未启用 grading，无需补录")
-    ref = ref or github.default_branch(repository)
+    if ref is None:
+        branch = github.default_branch(repository)
+        ref = github.get_json(f"/repos/{repository}/git/ref/heads/{branch}")["object"]["sha"]
     mode_of = {key: course.grade_mode(key) for key in course.assignments}
     legacy = [
         key

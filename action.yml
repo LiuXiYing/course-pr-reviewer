@@ -10,7 +10,8 @@ inputs:
   mode:
     description: >-
       review (default) reviews and publishes one PR; grade-reconcile promotes
-      PENDING receipts after a real merge; grade-export regenerates reports.
+      PENDING receipts after a real merge; grade-export regenerates reports;
+      grade-backfill records completions merged before grading existed, then exports.
     required: false
     default: review
   config-path:
@@ -161,6 +162,23 @@ runs:
         if [[ -n "$ONLY_PR" ]]; then args+=(--only-pr "$ONLY_PR"); fi
         if [[ "$DRY_RUN" == "true" ]]; then args+=(--dry-run); fi
         course-pr-reviewer grade reconcile \
+          --config "$COURSE_REVIEW_CONFIG" \
+          --students "$COURSE_STUDENTS_CONFIG" \
+          --repository "$GITHUB_REPOSITORY" \
+          "${args[@]}"
+
+    - name: Backfill legacy completions and regenerate reports
+      if: inputs.mode == 'grade-backfill'
+      shell: bash
+      env:
+        COURSE_REVIEW_CONFIG: ${{ inputs.config-path }}
+        COURSE_STUDENTS_CONFIG: ${{ inputs.students-path }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        args=()
+        if [[ "$DRY_RUN" == "true" ]]; then args+=(--dry-run); fi
+        course-pr-reviewer grade backfill \
           --config "$COURSE_REVIEW_CONFIG" \
           --students "$COURSE_STUDENTS_CONFIG" \
           --repository "$GITHUB_REPOSITORY" \
