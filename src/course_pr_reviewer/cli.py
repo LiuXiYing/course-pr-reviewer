@@ -15,6 +15,7 @@ from .config import load_course_config, load_student_roster
 from .consensus import TextConsensusReviewer, VisionConsensusReviewer
 from .exceptions import ConfigurationError, ReviewerError
 from .feedback import add_ai_feedback
+from .grading.backfill import backfill_completions
 from .grading.export import rebuild_reports
 from .grading.reconcile import reconcile
 from .grading.store import GitHubContentsStore, open_store
@@ -60,6 +61,7 @@ def _parser() -> argparse.ArgumentParser:
         ("init", "create the grades branch with metadata and README"),
         ("export", "regenerate reports/ from receipts and overrides"),
         ("reconcile", "promote PENDING receipts once the PR is really merged"),
+        ("backfill", "record legacy completions that were merged before grading"),
     ):
         sub = grade_sub.add_parser(name, help=help_text)
         sub.add_argument("--config", required=True)
@@ -84,6 +86,12 @@ def _parser() -> argparse.ArgumentParser:
             sub.add_argument("--only-pr", type=int, default=None)
         if name == "export":
             sub.add_argument("--rebuild-reports", action="store_true", default=True)
+        if name == "backfill":
+            sub.add_argument(
+                "--ref",
+                default=None,
+                help="默认分支上用于核对的提交；不填则取仓库默认分支的最新提交",
+            )
 
     notify = subparsers.add_parser(
         "notify", help="legacy no-op; email notifications are disabled"
@@ -232,6 +240,28 @@ def _grade(args) -> int:
         course_name=course.name,
         timezone=course.timezone,
     )
+
+    if args.grade_command == "backfill":
+        if github is None:
+            print("backfill 需要 GitHub 凭据", file=sys.stderr)
+            return 2
+        try:
+            summary = backfill_completions(
+                store,
+                course,
+                roster,
+                github,
+                repository,
+                ref=args.ref,
+                dry_run=args.dry_run,
+            )
+        except (ValueError, ReviewerError) as exc:
+            print(f"补录失败：{exc}", file=sys.stderr)
+            return 2
+        if not args.dry_run:
+            rebuild_reports(store, course, roster)
+        print(json.dumps(summary, ensure_ascii=False))
+        return 0
 
     if args.grade_command == "export":
         result = rebuild_reports(store, course, roster)

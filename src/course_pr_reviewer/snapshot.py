@@ -335,6 +335,43 @@ class GitHubClient:
         )
         return entry is not None
 
+    def list_dir(self, repository: str, path: str, ref: str) -> list[str]:
+        """列出目录下的名字（404 或空目录返回空列表）。
+
+        只取一层，用于补录历史完成情况：先列根目录得到学生目录，再逐个人列一次
+        作业目录，几十次请求就能覆盖整门课，不需要递归遍历上千个文件。
+        """
+        if path and not _safe_file_path(path):
+            raise ReviewSystemError("目录路径无效")
+        if not SHA_RE.fullmatch(ref):
+            raise ReviewSystemError("目标分支 SHA 无效")
+        repo = urllib.parse.quote(repository, safe="/")
+        suffix = f"/{urllib.parse.quote(path, safe='/')}" if path else ""
+        entry = self.get_json(
+            f"/repos/{repo}/contents{suffix}?ref={ref}", allow_missing=True
+        )
+        if entry is None:
+            return []
+        if isinstance(entry, dict):
+            name = entry.get("name")
+            return [name] if isinstance(name, str) else []
+        if not isinstance(entry, list):
+            raise ReviewSystemError("GitHub 返回了无效的目录列表")
+        return sorted(
+            item["name"]
+            for item in entry
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        )
+
+    def default_branch(self, repository: str) -> str:
+        repo = urllib.parse.quote(repository, safe="/")
+        data = self.get_json(f"/repos/{repo}")
+        if not isinstance(data, dict) or not isinstance(
+            data.get("default_branch"), str
+        ):
+            raise ReviewSystemError("无法确定仓库默认分支")
+        return data["default_branch"]
+
 
 def load_snapshot(
     metadata_dir: str | Path,
